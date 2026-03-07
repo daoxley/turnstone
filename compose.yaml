@@ -5,8 +5,8 @@
 #   Default (SQLite):     docker compose up
 #   Production (PG):      DB_BACKEND=postgresql docker compose --profile production up
 #                         (or set DB_BACKEND=postgresql in .env)
+#   10-node cluster:      docker compose --profile cluster up
 #   With simulator:       docker compose --profile sim up
-#   Scale bridges:        docker compose up --scale bridge=3
 # =============================================================================
 
 name: turnstone
@@ -28,6 +28,7 @@ services:
     image: postgres:17-alpine
     profiles:
       - production
+      - cluster
     environment:
       POSTGRES_DB: turnstone
       POSTGRES_USER: ${POSTGRES_USER:-turnstone}
@@ -272,3 +273,219 @@ services:
       redis:
         condition: service_healthy
     restart: "no"
+
+  # ===================================================================
+  # 10-node cluster (profile: cluster)
+  #
+  # Each node is a server + bridge pair.  All share the same PostgreSQL
+  # and Redis instances.  Access via console at :8090.
+  #
+  # Start:  docker compose --profile cluster up
+  # ===================================================================
+
+  # -- cluster servers ------------------------------------------------
+
+  server-1: &cluster-server
+    build: { context: ., dockerfile: Dockerfile }
+    profiles: [cluster]
+    command: &cluster-server-cmd
+      - sh
+      - -c
+      - >-
+        turnstone-server
+        --host 0.0.0.0
+        --port 8080
+        --base-url "$${LLM_BASE_URL}"
+        --api-key "$${OPENAI_API_KEY}"
+        $${MODEL:+--model $$MODEL}
+        $${SKIP_PERMISSIONS:+--skip-permissions}
+    volumes: [turnstone-data:/data]
+    environment: &cluster-server-env
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:8000/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-dummy}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      SKIP_PERMISSIONS: ${SKIP_PERMISSIONS:-}
+      TURNSTONE_AUTH_ENABLED: ${TURNSTONE_AUTH_ENABLED:-}
+      TURNSTONE_AUTH_TOKEN: ${TURNSTONE_AUTH_TOKEN:-}
+      TURNSTONE_JWT_SECRET: ${TURNSTONE_JWT_SECRET:-}
+      MODEL: ${MODEL:-}
+      TURNSTONE_DB_BACKEND: ${DB_BACKEND:-postgresql}
+      TURNSTONE_DB_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-turnstone}:${POSTGRES_PASSWORD:?}@postgres:5432/turnstone}
+      TURNSTONE_NODE_ID: node-1
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    networks: [turnstone-net]
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "/usr/local/bin/healthcheck.py", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits: { memory: 384M, cpus: '0.5' }
+    restart: unless-stopped
+
+  server-2:
+    <<: *cluster-server
+    environment: { <<: *cluster-server-env, TURNSTONE_NODE_ID: node-2 }
+  server-3:
+    <<: *cluster-server
+    environment: { <<: *cluster-server-env, TURNSTONE_NODE_ID: node-3 }
+  server-4:
+    <<: *cluster-server
+    environment: { <<: *cluster-server-env, TURNSTONE_NODE_ID: node-4 }
+  server-5:
+    <<: *cluster-server
+    environment: { <<: *cluster-server-env, TURNSTONE_NODE_ID: node-5 }
+  server-6:
+    <<: *cluster-server
+    environment: { <<: *cluster-server-env, TURNSTONE_NODE_ID: node-6 }
+  server-7:
+    <<: *cluster-server
+    environment: { <<: *cluster-server-env, TURNSTONE_NODE_ID: node-7 }
+  server-8:
+    <<: *cluster-server
+    environment: { <<: *cluster-server-env, TURNSTONE_NODE_ID: node-8 }
+  server-9:
+    <<: *cluster-server
+    environment: { <<: *cluster-server-env, TURNSTONE_NODE_ID: node-9 }
+  server-10:
+    <<: *cluster-server
+    environment: { <<: *cluster-server-env, TURNSTONE_NODE_ID: node-10 }
+
+  # -- cluster bridges ------------------------------------------------
+
+  bridge-1: &cluster-bridge
+    build: { context: ., dockerfile: Dockerfile }
+    profiles: [cluster]
+    command:
+      - turnstone-bridge
+      - --server-url=http://server-1:8080
+      - --redis-host=redis
+      - --redis-port=6379
+      - --heartbeat-ttl=${HEARTBEAT_TTL:-60}
+      - --approval-timeout=${APPROVAL_TIMEOUT:-3600}
+    environment: &cluster-bridge-env
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      TURNSTONE_AUTH_TOKEN: ${TURNSTONE_AUTH_TOKEN:-}
+      TURNSTONE_JWT_SECRET: ${TURNSTONE_JWT_SECRET:-}
+    networks: [turnstone-net]
+    depends_on:
+      server-1: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    deploy:
+      resources:
+        limits: { memory: 256M, cpus: '0.25' }
+    restart: unless-stopped
+
+  bridge-2:
+    <<: *cluster-bridge
+    command:
+      - turnstone-bridge
+      - --server-url=http://server-2:8080
+      - --redis-host=redis
+      - --redis-port=6379
+      - --heartbeat-ttl=${HEARTBEAT_TTL:-60}
+      - --approval-timeout=${APPROVAL_TIMEOUT:-3600}
+    depends_on:
+      server-2: { condition: service_healthy }
+      redis: { condition: service_healthy }
+  bridge-3:
+    <<: *cluster-bridge
+    command:
+      - turnstone-bridge
+      - --server-url=http://server-3:8080
+      - --redis-host=redis
+      - --redis-port=6379
+      - --heartbeat-ttl=${HEARTBEAT_TTL:-60}
+      - --approval-timeout=${APPROVAL_TIMEOUT:-3600}
+    depends_on:
+      server-3: { condition: service_healthy }
+      redis: { condition: service_healthy }
+  bridge-4:
+    <<: *cluster-bridge
+    command:
+      - turnstone-bridge
+      - --server-url=http://server-4:8080
+      - --redis-host=redis
+      - --redis-port=6379
+      - --heartbeat-ttl=${HEARTBEAT_TTL:-60}
+      - --approval-timeout=${APPROVAL_TIMEOUT:-3600}
+    depends_on:
+      server-4: { condition: service_healthy }
+      redis: { condition: service_healthy }
+  bridge-5:
+    <<: *cluster-bridge
+    command:
+      - turnstone-bridge
+      - --server-url=http://server-5:8080
+      - --redis-host=redis
+      - --redis-port=6379
+      - --heartbeat-ttl=${HEARTBEAT_TTL:-60}
+      - --approval-timeout=${APPROVAL_TIMEOUT:-3600}
+    depends_on:
+      server-5: { condition: service_healthy }
+      redis: { condition: service_healthy }
+  bridge-6:
+    <<: *cluster-bridge
+    command:
+      - turnstone-bridge
+      - --server-url=http://server-6:8080
+      - --redis-host=redis
+      - --redis-port=6379
+      - --heartbeat-ttl=${HEARTBEAT_TTL:-60}
+      - --approval-timeout=${APPROVAL_TIMEOUT:-3600}
+    depends_on:
+      server-6: { condition: service_healthy }
+      redis: { condition: service_healthy }
+  bridge-7:
+    <<: *cluster-bridge
+    command:
+      - turnstone-bridge
+      - --server-url=http://server-7:8080
+      - --redis-host=redis
+      - --redis-port=6379
+      - --heartbeat-ttl=${HEARTBEAT_TTL:-60}
+      - --approval-timeout=${APPROVAL_TIMEOUT:-3600}
+    depends_on:
+      server-7: { condition: service_healthy }
+      redis: { condition: service_healthy }
+  bridge-8:
+    <<: *cluster-bridge
+    command:
+      - turnstone-bridge
+      - --server-url=http://server-8:8080
+      - --redis-host=redis
+      - --redis-port=6379
+      - --heartbeat-ttl=${HEARTBEAT_TTL:-60}
+      - --approval-timeout=${APPROVAL_TIMEOUT:-3600}
+    depends_on:
+      server-8: { condition: service_healthy }
+      redis: { condition: service_healthy }
+  bridge-9:
+    <<: *cluster-bridge
+    command:
+      - turnstone-bridge
+      - --server-url=http://server-9:8080
+      - --redis-host=redis
+      - --redis-port=6379
+      - --heartbeat-ttl=${HEARTBEAT_TTL:-60}
+      - --approval-timeout=${APPROVAL_TIMEOUT:-3600}
+    depends_on:
+      server-9: { condition: service_healthy }
+      redis: { condition: service_healthy }
+  bridge-10:
+    <<: *cluster-bridge
+    command:
+      - turnstone-bridge
+      - --server-url=http://server-10:8080
+      - --redis-host=redis
+      - --redis-port=6379
+      - --heartbeat-ttl=${HEARTBEAT_TTL:-60}
+      - --approval-timeout=${APPROVAL_TIMEOUT:-3600}
+    depends_on:
+      server-10: { condition: service_healthy }
+      redis: { condition: service_healthy }

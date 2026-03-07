@@ -28,6 +28,8 @@ Console dashboard: http://localhost:8090
 | `bridge` | — | default | Redis-to-HTTP bridge (multi-node routing) |
 | `console` | 8090 | default | Cluster dashboard |
 | `channel` | — | production | Channel gateway (Discord, Slack, etc.) |
+| `server-1`…`server-10` | — | cluster | 10-node server fleet (PostgreSQL required) |
+| `bridge-1`…`bridge-10` | — | cluster | Matching bridge fleet |
 | `sim` | — | sim | Multi-node cluster simulator |
 
 ## Profiles
@@ -42,6 +44,12 @@ docker compose up
 
 ```bash
 docker compose --profile production up
+```
+
+**Cluster** — 10-node server/bridge fleet sharing PostgreSQL and Redis. Access all nodes via the console at `:8090`. Requires `POSTGRES_PASSWORD`:
+
+```bash
+docker compose --profile cluster up
 ```
 
 **Sim** — adds the simulator. Can run alongside the full stack or standalone with just Redis and the console:
@@ -135,13 +143,13 @@ The channel service runs in the `production` profile. When `TURNSTONE_DISCORD_TO
 
 ## Scaling
 
-Scale to multiple server/bridge pairs:
+For multi-node testing, use the `cluster` profile which provides 10 dedicated server+bridge pairs with unique node IDs (`node-1` through `node-10`), resource limits, and shared PostgreSQL:
 
 ```bash
-docker compose up --scale server=3 --scale bridge=3
+POSTGRES_PASSWORD=secret docker compose --profile cluster up
 ```
 
-Each bridge auto-generates a unique node ID from its container hostname. When scaling `server`, remove the host port mapping (or use a reverse proxy) to avoid port conflicts.
+The default `server` and `bridge` also run alongside the cluster nodes (11 total). All nodes are accessible via the console dashboard at `:8090`.
 
 ## Volumes
 
