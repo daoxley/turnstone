@@ -684,6 +684,117 @@ class TestWebUI:
 
 
 # ---------------------------------------------------------------------------
+# WebUI SSE fan-out
+# ---------------------------------------------------------------------------
+
+
+class TestWebUIFanOut:
+    """Verify per-client SSE fan-out on WebUI._enqueue / _register_listener."""
+
+    def test_enqueue_no_listeners(self):
+        """Events silently dropped when no listeners are registered."""
+        from turnstone.server import WebUI
+
+        ui = WebUI(ws_id="test")
+        ui._enqueue({"type": "content", "text": "hello"})  # should not raise
+
+    def test_enqueue_single_listener(self):
+        """Single listener receives the event."""
+        from turnstone.server import WebUI
+
+        ui = WebUI(ws_id="test")
+        q = ui._register_listener()
+        ui._enqueue({"type": "content", "text": "hello"})
+        assert q.get_nowait() == {"type": "content", "text": "hello"}
+
+    def test_enqueue_multiple_listeners(self):
+        """All registered listeners receive an identical copy."""
+        from turnstone.server import WebUI
+
+        ui = WebUI(ws_id="test")
+        q1 = ui._register_listener()
+        q2 = ui._register_listener()
+        q3 = ui._register_listener()
+
+        event = {"type": "content", "text": "world"}
+        ui._enqueue(event)
+
+        assert q1.get_nowait() == event
+        assert q2.get_nowait() == event
+        assert q3.get_nowait() == event
+
+    def test_unregister_stops_delivery(self):
+        """After unregister, the queue receives no further events."""
+        import queue as queue_mod
+
+        from turnstone.server import WebUI
+
+        ui = WebUI(ws_id="test")
+        q = ui._register_listener()
+        ui._unregister_listener(q)
+        ui._enqueue({"type": "content", "text": "gone"})
+
+        with pytest.raises(queue_mod.Empty):
+            q.get_nowait()
+
+    def test_slow_consumer_does_not_block(self):
+        """A full queue doesn't block the producer or starve other listeners."""
+        from turnstone.server import WebUI
+
+        ui = WebUI(ws_id="test")
+        slow = ui._register_listener()
+        fast = ui._register_listener()
+
+        # Fill only the slow consumer's queue directly to capacity
+        for i in range(500):
+            slow.put_nowait({"type": "content", "text": f"fill-{i}"})
+
+        assert slow.qsize() == 500
+        assert fast.qsize() == 0
+
+        # Enqueue via fan-out — slow drops (full), fast receives
+        event = {"type": "content", "text": "overflow"}
+        ui._enqueue(event)
+        assert slow.qsize() == 500  # still full, overflow dropped
+        assert fast.qsize() == 1
+        assert fast.get_nowait() == event
+
+    def test_unregister_idempotent(self):
+        """Double unregister does not raise."""
+
+        from turnstone.server import WebUI
+
+        ui = WebUI(ws_id="test")
+        q = ui._register_listener()
+        ui._unregister_listener(q)
+        ui._unregister_listener(q)  # should not raise
+
+    def test_concurrent_enqueue_and_register(self):
+        """Concurrent register/unregister and enqueue should not crash."""
+        from turnstone.server import WebUI
+
+        ui = WebUI(ws_id="test")
+        stop = threading.Event()
+
+        def register_loop():
+            while not stop.is_set():
+                q = ui._register_listener()
+                ui._unregister_listener(q)
+
+        def enqueue_loop():
+            for i in range(500):
+                ui._enqueue({"type": "content", "text": f"tok-{i}"})
+
+        t1 = threading.Thread(target=register_loop)
+        t2 = threading.Thread(target=enqueue_loop)
+        t1.start()
+        t2.start()
+        t2.join()
+        stop.set()
+        t1.join()
+
+
+# ---------------------------------------------------------------------------
 # Integration: WorkstreamManager + session state transitions
 # ---------------------------------------------------------------------------
 
