@@ -80,8 +80,9 @@ class WebUI:
     _global_queue: queue.Queue[dict[str, Any]] | None = None
     _workstream_mgr: WorkstreamManager | None = None
 
-    def __init__(self, ws_id: str = "") -> None:
+    def __init__(self, ws_id: str = "", user_id: str = "") -> None:
         self.ws_id = ws_id
+        self._user_id = user_id
         self._listeners: list[queue.Queue[dict[str, Any]]] = []
         self._listeners_lock = threading.Lock()
         self._approval_event = threading.Event()
@@ -198,6 +199,55 @@ class WebUI:
                 }
             )
 
+        # -- Tool policy evaluation -----------------------------------------------
+        # Check admin-defined tool policies before the auto_approve check.
+        if pending:
+            try:
+                from turnstone.core.policy import evaluate_tool_policies_batch
+                from turnstone.core.storage._registry import get_storage
+
+                storage = get_storage()
+                if storage is not None:
+                    tool_names = [it.get("func_name", "") for it in pending if it.get("func_name")]
+                    if tool_names:
+                        verdicts = evaluate_tool_policies_batch(storage, tool_names)
+                        still_pending = []
+                        for it in pending:
+                            fname = it.get("func_name", "")
+                            verdict = verdicts.get(fname)
+                            if verdict == "deny":
+                                it["denied"] = True
+                                it["denial_msg"] = (
+                                    f"Blocked by tool policy (pattern match for '{fname}')"
+                                )
+                            elif verdict == "allow":
+                                it["needs_approval"] = False
+                            else:
+                                still_pending.append(it)
+                        # Rebuild serialized to reflect policy verdicts
+                        serialized = [
+                            {
+                                "call_id": it.get("call_id", ""),
+                                "header": it.get("header", ""),
+                                "preview": it.get("preview", ""),
+                                "func_name": it.get("func_name", ""),
+                                "approval_label": it.get("approval_label", it.get("func_name", "")),
+                                "needs_approval": it.get("needs_approval", False),
+                                "error": it.get("denial_msg") if it.get("denied") else None,
+                            }
+                            for it in items
+                        ]
+                        # If all were resolved by policy, check if any were denied
+                        if not still_pending:
+                            any_denied = any(it.get("denied") for it in items)
+                            if any_denied:
+                                self._enqueue({"type": "tool_info", "items": serialized})
+                                return False, "Blocked by tool policy"
+                        pending = still_pending
+            except Exception:
+                log.debug("Tool policy evaluation failed", exc_info=True)
+        # -- End tool policy evaluation -------------------------------------------
+
         if not pending or self.auto_approve:
             # Track auto-approved tool activity
             first = items[0] if items else {}
@@ -258,6 +308,7 @@ class WebUI:
             self._ws_prompt_tokens += usage["prompt_tokens"]
             self._ws_completion_tokens += usage["completion_tokens"]
             self._ws_context_ratio = total_tok / context_window if context_window > 0 else 0.0
+            tool_count = sum(self._ws_tool_calls.values())
         self._enqueue(
             {
                 "type": "status",
@@ -269,6 +320,26 @@ class WebUI:
                 "effort": effort,
             }
         )
+        # Record usage event for governance dashboard
+        try:
+            from turnstone.core.storage._registry import get_storage
+
+            storage = get_storage()
+            if storage is not None:
+                import uuid
+
+                storage.record_usage_event(
+                    event_id=uuid.uuid4().hex,
+                    user_id=self._user_id,
+                    ws_id=self.ws_id,
+                    node_id="",
+                    model=usage.get("model", ""),
+                    prompt_tokens=usage["prompt_tokens"],
+                    completion_tokens=usage["completion_tokens"],
+                    tool_calls_count=tool_count,
+                )
+        except Exception:
+            pass  # Non-critical — never break the response pipeline
 
     def on_plan_review(self, content: str) -> str:
         self._plan_event.clear()
@@ -877,10 +948,12 @@ async def create_workstream(request: Request) -> JSONResponse:
         return body
     mgr: WorkstreamManager = request.app.state.workstreams
     skip: bool = request.app.state.skip_permissions
+    auth = getattr(getattr(request, "state", None), "auth_result", None)
+    uid: str = getattr(auth, "user_id", "") or ""
     try:
         ws = mgr.create(
             name=body.get("name", ""),
-            ui_factory=lambda wid: WebUI(ws_id=wid),
+            ui_factory=lambda wid: WebUI(ws_id=wid, user_id=uid),
             model=body.get("model") or None,
         )
         assert isinstance(ws.ui, WebUI)
