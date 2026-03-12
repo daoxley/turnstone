@@ -139,12 +139,17 @@ class Bridge:
     # -- public entry point --------------------------------------------------
 
     def _fetch_node_id(self) -> str:
-        """Retrieve node_id from server /health with exponential backoff.
+        """Retrieve node_id from server /health with capped exponential backoff.
 
-        Raises ``SystemExit`` if the server is unreachable after 5 attempts.
+        Retries indefinitely so the bridge recovers when a server comes
+        back after a transient outage.  4xx responses (auth/config errors)
+        still fail fast.
         """
-        delays = [1, 2, 4, 8, 16]
-        for attempt, delay in enumerate(delays, 1):
+        attempt = 0
+        delay = 1.0
+        max_delay = 60.0
+        while True:
+            attempt += 1
             try:
                 resp = self._http.get("/health")
                 if 400 <= resp.status_code < 500:
@@ -155,20 +160,17 @@ class Bridge:
                 nid = data.get("node_id", "")
                 if nid:
                     return str(nid)
-                log.warning("Server /health missing node_id (attempt %d/%d)", attempt, len(delays))
+                log.warning("Server /health missing node_id (attempt %d)", attempt)
+            except SystemExit:
+                raise
             except Exception as exc:
                 log.warning(
-                    "Failed to fetch node_id from server (attempt %d/%d): %s",
+                    "Failed to fetch node_id from server (attempt %d): %s",
                     attempt,
-                    len(delays),
                     exc,
                 )
-            if attempt < len(delays):
-                time.sleep(delay)
-        log.critical(
-            "Could not retrieve node_id from server after %d attempts — exiting", len(delays)
-        )
-        raise SystemExit(1)
+            time.sleep(delay)
+            delay = min(delay * 2, max_delay)
 
     def run(self) -> None:
         """Block until shutdown (KeyboardInterrupt)."""
