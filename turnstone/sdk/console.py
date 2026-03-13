@@ -26,12 +26,15 @@ from turnstone.api.console_schemas import (
     ListRolesResponse,
     ListToolPoliciesResponse,
     ListUserRolesResponse,
+    ListWsTemplatesResponse,
+    ListWsTemplateVersionsResponse,
     NodeDetailResponse,
     OrgInfo,
     PromptTemplateInfo,
     RoleInfo,
     ToolPolicyInfo,
     UsageResponse,
+    WsTemplateInfo,
 )
 from turnstone.api.schemas import (
     AuthLoginResponse,
@@ -127,6 +130,7 @@ class AsyncTurnstoneConsole(_BaseClient):
         model: str = "",
         initial_message: str = "",
         template: str = "",
+        ws_template: str = "",
     ) -> ConsoleCreateWsResponse:
         body: dict[str, Any] = {}
         if node_id:
@@ -139,6 +143,8 @@ class AsyncTurnstoneConsole(_BaseClient):
             body["initial_message"] = initial_message
         if template:
             body["template"] = template
+        if ws_template:
+            body["ws_template"] = ws_template
         return await self._request(
             "POST",
             "/v1/api/cluster/workstreams/new",
@@ -465,6 +471,56 @@ class AsyncTurnstoneConsole(_BaseClient):
             response_model=StatusResponse,
         )
 
+    # -- governance: workstream templates ------------------------------------
+
+    async def list_ws_templates(self) -> ListWsTemplatesResponse:
+        """List all workstream templates."""
+        return await self._request(
+            "GET", "/v1/api/admin/ws-templates", response_model=ListWsTemplatesResponse
+        )
+
+    async def create_ws_template(self, name: str, **kwargs: Any) -> WsTemplateInfo:
+        """Create a workstream template."""
+        payload: dict[str, Any] = {"name": name, **kwargs}
+        return await self._request(
+            "POST", "/v1/api/admin/ws-templates", json_body=payload, response_model=WsTemplateInfo
+        )
+
+    async def get_ws_template(self, ws_template_id: str) -> WsTemplateInfo:
+        """Get a workstream template by ID."""
+        return await self._request(
+            "GET",
+            f"/v1/api/admin/ws-templates/{ws_template_id}",
+            response_model=WsTemplateInfo,
+        )
+
+    async def update_ws_template(self, ws_template_id: str, **kwargs: Any) -> WsTemplateInfo:
+        """Update a workstream template."""
+        return await self._request(
+            "PUT",
+            f"/v1/api/admin/ws-templates/{ws_template_id}",
+            json_body=kwargs,
+            response_model=WsTemplateInfo,
+        )
+
+    async def delete_ws_template(self, ws_template_id: str) -> StatusResponse:
+        """Delete a workstream template."""
+        return await self._request(
+            "DELETE",
+            f"/v1/api/admin/ws-templates/{ws_template_id}",
+            response_model=StatusResponse,
+        )
+
+    async def list_ws_template_versions(
+        self, ws_template_id: str
+    ) -> ListWsTemplateVersionsResponse:
+        """List version history for a workstream template."""
+        return await self._request(
+            "GET",
+            f"/v1/api/admin/ws-templates/{ws_template_id}/versions",
+            response_model=ListWsTemplateVersionsResponse,
+        )
+
     # -- governance: usage & audit -------------------------------------------
 
     async def get_usage(
@@ -578,6 +634,7 @@ class TurnstoneConsole:
         model: str = "",
         initial_message: str = "",
         template: str = "",
+        ws_template: str = "",
     ) -> ConsoleCreateWsResponse:
         return self._runner.run(
             self._async.create_workstream(
@@ -586,6 +643,7 @@ class TurnstoneConsole:
                 model=model,
                 initial_message=initial_message,
                 template=template,
+                ws_template=ws_template,
             )
         )
 
@@ -782,6 +840,26 @@ class TurnstoneConsole:
 
     def delete_template(self, template_id: str) -> StatusResponse:
         return self._runner.run(self._async.delete_template(template_id))
+
+    # -- governance: workstream templates ------------------------------------
+
+    def list_ws_templates(self) -> ListWsTemplatesResponse:
+        return self._runner.run(self._async.list_ws_templates())
+
+    def create_ws_template(self, name: str, **kwargs: Any) -> WsTemplateInfo:
+        return self._runner.run(self._async.create_ws_template(name, **kwargs))
+
+    def get_ws_template(self, ws_template_id: str) -> WsTemplateInfo:
+        return self._runner.run(self._async.get_ws_template(ws_template_id))
+
+    def update_ws_template(self, ws_template_id: str, **kwargs: Any) -> WsTemplateInfo:
+        return self._runner.run(self._async.update_ws_template(ws_template_id, **kwargs))
+
+    def delete_ws_template(self, ws_template_id: str) -> StatusResponse:
+        return self._runner.run(self._async.delete_ws_template(ws_template_id))
+
+    def list_ws_template_versions(self, ws_template_id: str) -> ListWsTemplateVersionsResponse:
+        return self._runner.run(self._async.list_ws_template_versions(ws_template_id))
 
     # -- governance: usage & audit -------------------------------------------
 

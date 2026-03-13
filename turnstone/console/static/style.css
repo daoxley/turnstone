@@ -916,7 +916,8 @@
   cursor: pointer;
   margin-top: 14px;
 }
-.admin-modal label.admin-checkbox input[type="checkbox"] {
+.admin-modal label.admin-checkbox input[type="checkbox"],
+.admin-modal label.admin-checkbox input[type="radio"] {
   width: auto;
   margin: 0;
 }
@@ -1019,7 +1020,8 @@
 #create-schedule-overlay, #edit-schedule-overlay, #schedule-runs-overlay,
 #create-role-overlay, #edit-role-overlay, #user-roles-overlay,
 #create-policy-overlay, #edit-policy-overlay,
-#create-template-overlay, #edit-template-overlay {
+#create-template-overlay, #edit-template-overlay,
+#create-wst-overlay, #edit-wst-overlay, #wst-history-overlay {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.7);
@@ -1132,6 +1134,10 @@
 #admin-templates .admin-colheaders,
 #admin-templates .admin-row {
   grid-template-columns: 1.5fr 100px 1fr 140px;
+}
+#admin-ws-templates .admin-colheaders,
+#admin-ws-templates .admin-row {
+  grid-template-columns: 1.5fr 100px 1fr 180px;
 }
 
 /* ==========================================================================
@@ -1321,6 +1327,9 @@
     grid-template-columns: 1fr 100px;
   }
   .admin-col-tmcat, .admin-col-tmvars { display: none; }
+  #admin-ws-templates .admin-colheaders, #admin-ws-templates .admin-row {
+    grid-template-columns: 1fr 140px;
+  }
   #admin-audit .admin-colheaders, #admin-audit .admin-row {
     grid-template-columns: 60px 1fr 100px;
   }
