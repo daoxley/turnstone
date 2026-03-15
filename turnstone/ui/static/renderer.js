@@ -3,9 +3,18 @@
 // ---------------------------------------------------------------------------
 //  Inline formatting
 // ---------------------------------------------------------------------------
+// Safe inline HTML tags allowed through escapeHtml (no attributes — XSS safe)
+// Block-level tags (details, summary, hr) handled by their own protection passes
+var _SAFE_TAGS =
+  /&lt;(\/?(?:br|kbd|mark|sub|sup|ins|wbr|abbr|small|u|s))(?:\s*\/?)&gt;/gi;
+
 function inlineMarkdown(text) {
   // Escape HTML first so only tags we generate are real
   text = escapeHtml(text);
+  // Restore safe HTML tags (attribute-free only — already escaped so no XSS)
+  text = text.replace(_SAFE_TAGS, function (m, tag) {
+    return "<" + tag + ">";
+  });
   // Bold (asterisks only — underscores cause false positives on snake_case)
   text = text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
   // Italic (asterisks only)
@@ -304,6 +313,30 @@ function renderMarkdown(text) {
     return "\x00CB" + (codeBlocks.length - 1) + "\x00";
   });
 
+  // Protect <details> blocks (safe HTML — attribute-free only)
+  var detailsBlocks = [];
+  text = text.replace(
+    /<details>\s*\n?([\s\S]*?)<\/details>/gi,
+    function (m, inner) {
+      var sumMatch = inner.match(
+        /^\s*<summary>([\s\S]*?)<\/summary>\s*\n?([\s\S]*)/i,
+      );
+      var html;
+      if (sumMatch) {
+        html =
+          "<details><summary>" +
+          inlineMarkdown(sumMatch[1].trim()) +
+          "</summary>" +
+          renderMarkdown(sumMatch[2]) +
+          "</details>";
+      } else {
+        html = "<details>" + renderMarkdown(inner) + "</details>";
+      }
+      detailsBlocks.push(html);
+      return "\x00DT" + (detailsBlocks.length - 1) + "\x00";
+    },
+  );
+
   // Protect display math ($$...$$) — must come before inline code/math
   var mathBlocks = [];
   text = text.replace(/\$\$([\s\S]+?)\$\$/g, function (m, tex) {
@@ -579,6 +612,12 @@ function renderMarkdown(text) {
   result = result.replace(/\x00CB(\d+)\x00/g, function (m, idx) {
     return codeBlocks[parseInt(idx)];
   });
+  result = result.replace(/<p>\x00DT(\d+)\x00<\/p>/g, function (m, idx) {
+    return detailsBlocks[parseInt(idx)];
+  });
+  result = result.replace(/\x00DT(\d+)\x00/g, function (m, idx) {
+    return detailsBlocks[parseInt(idx)];
+  });
   result = result.replace(/<p>\x00BQ(\d+)\x00<\/p>/g, function (m, idx) {
     return bqBlocks[parseInt(idx)];
   });
@@ -618,6 +657,7 @@ var _NO_HIGHLIGHT_LANGS = {
   plain: true,
   nohighlight: true,
   mermaid: true,
+  plantuml: true,
 };
 var _TERMINAL_LANGS = {
   bash: true,
