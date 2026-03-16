@@ -68,7 +68,8 @@ jobs:
           python-version: "3.14"
       - run: uv sync --frozen --all-extras
       - run: uv pip install pip-audit
-      - run: uv run pip-audit --strict --desc
+      - name: Security audit (dependencies)
+        run: uv export --no-emit-project --frozen | uv run pip-audit --strict --desc -r /dev/stdin
 
   security-ts:
     runs-on: ubuntu-latest
