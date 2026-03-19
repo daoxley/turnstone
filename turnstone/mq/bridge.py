@@ -9,7 +9,6 @@ Run as: ``turnstone-bridge --server-url http://localhost:8080``
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import os
@@ -800,11 +799,13 @@ class Bridge:
                 with self._lock:
                     self._pending_plan_reviews.pop(ws_id, None)
                 # Best-effort rejection so the server doesn't hang
-                with contextlib.suppress(Exception):
+                try:
                     self._http.post(
                         "/v1/api/plan",
                         json={"feedback": "reject", "ws_id": ws_id},
                     )
+                except Exception:
+                    log.warning("Failed to reject plan for ws=%s", ws_id, exc_info=True)
                 raise
 
         threading.Thread(target=self._run_in_context(_wait_plan), daemon=True).start()
@@ -894,7 +895,16 @@ class Bridge:
     # -- heartbeat -----------------------------------------------------------
 
     def _heartbeat_loop(self) -> None:
-        """Periodically register this node in the broker."""
+        """Periodically register this node in the broker.
+
+        An initial jitter (derived from the node_id) staggers heartbeats
+        across cluster nodes so they don't all hit Redis at the same instant.
+        """
+        # Deterministic per-node jitter: spread across first quarter of TTL
+        h = hash(self._node_id) & 0x7FFFFFFF
+        jitter = (h % 2147483647) / 2147483647 * (self._heartbeat_ttl / 4)
+        if jitter > 0.1:
+            time.sleep(jitter)
         while self._running:
             self._broker.register_node(
                 self._node_id,
@@ -938,9 +948,11 @@ def _iter_sse_data(resp: httpx.Response) -> Iterator[dict[str, Any]]:
     source = EventSource(resp)
     for sse in source.iter_sse():
         if sse.data:
-            with contextlib.suppress(json.JSONDecodeError):
+            try:
                 data: dict[str, Any] = json.loads(sse.data)
                 yield data
+            except json.JSONDecodeError:
+                log.debug("Skipping malformed SSE data: %.200s", sse.data)
 
 
 # ---------------------------------------------------------------------------

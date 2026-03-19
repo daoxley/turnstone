@@ -752,10 +752,15 @@ def _handle_cluster_command(cmd_line: str, console_url: str | None, auth_token: 
 
 
 def detect_model(client: Any, provider: str = "openai") -> tuple[str, int | None]:
-    """Auto-detect model — delegates to :func:`turnstone.core.model_registry.detect_model`."""
+    """Auto-detect model — delegates to :func:`turnstone.core.model_registry.detect_model`.
+
+    CLI always uses fatal=True, so model is never None.
+    """
     from turnstone.core.model_registry import detect_model as _detect
 
-    return _detect(client, provider=provider)
+    model, ctx = _detect(client, provider=provider)
+    assert model is not None  # fatal=True guarantees non-None or SystemExit
+    return model, ctx
 
 
 # ─── Main ──────────────────────────────────────────────────────────────────
@@ -980,7 +985,7 @@ def main() -> None:
     db_url = getattr(args, "db_url", None) or os.environ.get("TURNSTONE_DB_URL", "")
     db_path = getattr(args, "db_path", None) or os.environ.get("TURNSTONE_DB_PATH", "")
     db_pool_size = int(
-        getattr(args, "db_pool_size", None) or os.environ.get("TURNSTONE_DB_POOL_SIZE", "5")
+        getattr(args, "db_pool_size", None) or os.environ.get("TURNSTONE_DB_POOL_SIZE", "2")
     )
     init_storage(db_backend, path=db_path, url=db_url, pool_size=db_pool_size)
 
