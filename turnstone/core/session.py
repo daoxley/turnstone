@@ -302,7 +302,7 @@ class ChatSession:
         self._notify_count = 0
         # Watch support: server-level runner injected via set_watch_runner()
         self._watch_runner: Any = None  # WatchRunner | None
-        self._watch_pending: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._watch_pending: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=20)
         self._watch_dispatch_depth = 0
         # Metacognitive nudges: ephemeral prompts for proactive memory use
         self._metacog_state: dict[str, float] = {}
@@ -549,7 +549,12 @@ class ChatSession:
             pending = self._watch_pending
 
             def _enqueue(msg: str) -> None:
-                pending.put({"message": msg})
+                try:
+                    pending.put_nowait({"message": msg})
+                except queue.Full:
+                    log.warning(
+                        "Watch pending queue full, dropping result for ws_id=%s", self._ws_id
+                    )
 
             runner.set_dispatch_fn(self._ws_id, _enqueue)
 
@@ -3509,8 +3514,11 @@ class ChatSession:
                 finally:
                     timer.cancel()
 
-                proc.wait()
-                stderr_thread.join()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    log.warning("Process did not exit after SIGKILL, pid=%d", proc.pid)
+                stderr_thread.join(timeout=5)
             finally:
                 os.unlink(script_path)
 
