@@ -259,6 +259,7 @@ class ChatSession:
             if registry and model_alias
             else create_provider("openai")
         )
+        self._cached_capabilities: ModelCapabilities | None = None
         self.ui = ui
         self.instructions = instructions
         self.temperature = temperature
@@ -382,9 +383,16 @@ class ChatSession:
                     caps = dataclasses.replace(caps, **overrides)
         return caps
 
-    def _get_capabilities(self) -> ModelCapabilities:
-        """Get capabilities for the current model."""
-        return self._resolve_capabilities(self._provider, self.model, self._model_alias)
+    def _get_capabilities(self, provider: Any = None, model: str = "") -> ModelCapabilities:
+        """Get capabilities for a model. Cached for the primary session model."""
+        p = provider or self._provider
+        m = model or self.model
+        # Only use cache for the primary session model — fallback models bypass.
+        if p is self._provider and m == self.model:
+            if self._cached_capabilities is None:
+                self._cached_capabilities = self._resolve_capabilities(p, m, self._model_alias)
+            return self._cached_capabilities
+        return self._resolve_capabilities(p, m, "")
 
     def _save_config(self) -> None:
         """Persist LLM-affecting config so resumed workstreams behave identically."""
@@ -678,6 +686,7 @@ class ChatSession:
                 update_workstream_title(self._ws_id, title[:80])
                 self.ui.on_rename(title[:80])
         except Exception:
+            self._title_generated = False
             log.debug("Title generation failed for ws=%s", self._ws_id, exc_info=True)
 
     def resume(self, ws_id: str) -> bool:
@@ -5153,6 +5162,7 @@ class ChatSession:
                 self.model = model_name
                 self._model_alias = arg
                 self._provider = self._registry.get_provider(arg)
+                self._cached_capabilities = None
                 self.context_window = cfg.context_window
                 if not self._manual_tool_truncation:
                     self.tool_truncation = int(cfg.context_window * self._chars_per_token * 0.5)
