@@ -389,7 +389,24 @@ class WebUI:
             self._ws_current_activity = ""
             self._ws_activity_state = ""
         self._broadcast_activity()
-        self._enqueue({"type": "tool_result", "call_id": call_id, "name": name, "output": output})
+        is_error = isinstance(output, str) and (
+            output.startswith("Error")
+            or output.startswith("Command timed out")
+            or output.startswith("Search timed out")
+            or output.startswith("Unknown tool:")
+            or output.startswith("JSON parse error:")
+            or output.startswith("MCP prompt timed out")
+            or output.startswith("MCP prompt error")
+        )
+        event: dict[str, Any] = {
+            "type": "tool_result",
+            "call_id": call_id,
+            "name": name,
+            "output": output,
+        }
+        if is_error:
+            event["is_error"] = True
+        self._enqueue(event)
 
     def on_tool_output_chunk(self, call_id: str, chunk: str) -> None:
         self._enqueue({"type": "tool_output_chunk", "call_id": call_id, "chunk": chunk})
@@ -624,13 +641,22 @@ def _build_history(
                 }
                 for tc in msg["tool_calls"]
             ]
-        # Detect denied/blocked tool results by their content prefix.
+        # Detect denied/blocked/errored tool results by their content prefix.
         if msg.get("role") == "tool":
             content = msg.get("content", "")
-            if isinstance(content, str) and (
-                content.startswith("Denied by user") or content.startswith("Blocked")
-            ):
-                entry["denied"] = True
+            if isinstance(content, str):
+                if content.startswith("Denied by user") or content.startswith("Blocked"):
+                    entry["denied"] = True
+                elif (
+                    content.startswith("Error")
+                    or content.startswith("Command timed out")
+                    or content.startswith("Search timed out")
+                    or content.startswith("Unknown tool:")
+                    or content.startswith("JSON parse error:")
+                    or content.startswith("MCP prompt timed out")
+                    or content.startswith("MCP prompt error")
+                ):
+                    entry["is_error"] = True
         history.append(entry)
 
     # Propagate denial from tool results to their parent assistant entry.
