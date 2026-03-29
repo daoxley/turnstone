@@ -2788,10 +2788,7 @@ class ChatSession:
             preview_parts.append(
                 f"    {YELLOW}Warning: overwriting existing file not previously read{RESET}"
             )
-        text = content[:500]
-        if len(content) > 500:
-            text += f"\n... ({len(content)} chars total)"
-        preview_parts.append(f"{DIM}{textwrap.indent(text, '    ')}{RESET}")
+        preview_parts.append(f"{DIM}{textwrap.indent(content, '    ')}{RESET}")
 
         return {
             "call_id": call_id,
@@ -2834,6 +2831,15 @@ class ChatSession:
                 "needs_approval": False,
                 "error": "Error: missing old_string",
             }
+        if old_string == new_string:
+            return {
+                "call_id": call_id,
+                "func_name": "edit_file",
+                "header": "\u2717 edit_file: no-op",
+                "preview": "",
+                "needs_approval": False,
+                "error": "Error: old_string and new_string are identical",
+            }
         path = os.path.expanduser(path)
         resolved = os.path.realpath(path)
 
@@ -2859,7 +2865,10 @@ class ChatSession:
                     "header": f"\u2717 edit_file: {path}",
                     "preview": "",
                     "needs_approval": False,
-                    "error": f"Error: old_string not found in {path}",
+                    "error": (
+                        f"Error: old_string not found in {path}. "
+                        "The file may have changed — re-read it before retrying."
+                    ),
                 }
             if len(occurrences) > 1 and near_line is None:
                 line_list = ", ".join(str(ln) for ln in occurrences)
@@ -2893,14 +2902,12 @@ class ChatSession:
                 "error": f"Error editing {path}: {e}",
             }
 
-        # Build diff preview
+        # Build diff preview — full content (model output is inherently bounded)
         preview_parts = []
-        old_preview = old_string[:200] + ("..." if len(old_string) > 200 else "")
-        new_preview = new_string[:200] + ("..." if len(new_string) > 200 else "")
-        for line in old_preview.splitlines():
+        for line in old_string.splitlines():
             preview_parts.append(f"    {RED}- {line}{RESET}")
         if new_string:
-            for line in new_preview.splitlines():
+            for line in new_string.splitlines():
                 preview_parts.append(f"    {GREEN}+ {line}{RESET}")
         else:
             preview_parts.append(f"    {YELLOW}(deletion — {len(old_string)} chars removed){RESET}")
@@ -2934,10 +2941,7 @@ class ChatSession:
                 "error": "Error: no code provided",
             }
         # Show code preview
-        display = code[:300]
-        if len(code) > 300:
-            display += f"\n... ({len(code)} chars total)"
-        preview = f"{DIM}{textwrap.indent(display, '    ')}{RESET}"
+        preview = f"{DIM}{textwrap.indent(code, '    ')}{RESET}"
         return {
             "call_id": call_id,
             "func_name": "math",
@@ -3815,7 +3819,7 @@ class ChatSession:
         call_id, command = item["call_id"], item["command"]
         try:
             with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
-                f.write(command)
+                f.write("set -o pipefail\n" + command)
                 script_path = f.name
             try:
                 from turnstone.core.env import scrubbed_env
@@ -3897,10 +3901,10 @@ class ChatSession:
             output = output.strip()
             output = self._truncate_output(output)
 
-            self.ui.on_tool_result(call_id, "bash", output)
-
             if proc.returncode != 0:
                 output += f"\n[exit code: {proc.returncode}]"
+
+            self.ui.on_tool_result(call_id, "bash", output)
 
             return call_id, output if output else "(no output)"
 
