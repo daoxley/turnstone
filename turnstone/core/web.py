@@ -21,16 +21,32 @@ def strip_html(html: str) -> str:
 
 
 def check_ssrf(url: str) -> str | None:
-    """Return error string if URL resolves to a private/link-local address, else None."""
+    """Return error string if URL resolves to a private/link-local address, else None.
+
+    Checks both IPv4 and IPv6 addresses via getaddrinfo to prevent bypasses
+    using IPv6 loopback (``::1``), link-local (``fe80::``), or unique-local
+    (``fd00::``/``fc00::``) addresses.
+    """
     try:
         parsed = urlparse(url)
         hostname = parsed.hostname
         if not hostname:
             return "Invalid URL: no hostname"
-        addr = socket.gethostbyname(hostname)
-        ip = ipaddress.ip_address(addr)
-        if ip.is_private or ip.is_loopback or ip.is_link_local:
-            return f"Blocked: URL resolves to private/internal address ({addr})"
-    except (socket.gaierror, ValueError):
-        pass  # DNS failure or invalid IP — let the actual fetch handle it
+        # Resolve all address families (IPv4 + IPv6)
+        results = socket.getaddrinfo(hostname, parsed.port or 80, proto=socket.IPPROTO_TCP)
+        for _family, _type, _proto, _canonname, sockaddr in results:
+            addr = str(sockaddr[0])
+            # Strip IPv6 zone/scope identifier (e.g. "fe80::1%lo0")
+            addr_clean = addr.split("%", 1)[0] if "%" in addr else addr
+            try:
+                ip = ipaddress.ip_address(addr_clean)
+            except ValueError:
+                return f"Blocked: unable to parse resolved address ({addr})"
+            # Normalize IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1)
+            if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+                ip = ip.ipv4_mapped
+            if ip.is_private or ip.is_loopback or ip.is_link_local:
+                return f"Blocked: URL resolves to private/internal address ({addr})"
+    except (socket.gaierror, OSError):
+        pass  # DNS failure — let the actual fetch handle it
     return None
