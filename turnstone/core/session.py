@@ -648,6 +648,43 @@ class ChatSession:
         """
         self._init_system_messages()
 
+    def _refresh_model_from_registry(self) -> None:
+        """Re-resolve model from registry if the backend changed.
+
+        Called at the top of ``send()`` — two string compares when nothing
+        changed, full re-resolve when the health monitor detected a model swap.
+        """
+        if not self._registry or not self._model_alias:
+            return
+        try:
+            if not self._registry.has_alias(self._model_alias):
+                return
+            cfg = self._registry.get_config(self._model_alias)
+            if cfg.model == self.model:
+                return
+            client, model_name, new_cfg = self._registry.resolve(self._model_alias)
+        except (ValueError, KeyError):
+            return  # alias disappeared during concurrent reload
+        self.client = client
+        self.model = model_name
+        self._provider = self._registry.get_provider(self._model_alias)
+        self._cached_capabilities = None
+        if new_cfg.context_window and new_cfg.context_window != self.context_window:
+            self.context_window = new_cfg.context_window
+            # Recompute auto tool truncation for new context window
+            if not self._manual_tool_truncation:
+                self.tool_truncation = int(new_cfg.context_window * self._chars_per_token * 0.5)
+        # Reset judge so it picks up the new model/provider
+        if self._judge is not None:
+            self._judge = None
+        self._init_system_messages()
+        log.info(
+            "session.model_updated ws=%s model=%s ctx=%d",
+            self._ws_id,
+            model_name,
+            self.context_window,
+        )
+
     def _rebuild_tool_search(self) -> None:
         """Reconstruct ToolSearchManager, preserving expanded tools."""
         old_expanded = self._tool_search.get_expanded_names() if self._tool_search else []
@@ -1338,6 +1375,7 @@ class ChatSession:
 
     def send(self, user_input: str) -> None:
         """Send user input and handle the response loop (including tool calls)."""
+        self._refresh_model_from_registry()
         # Token budget approval gate
         if self._budget_exhausted:
             approved, _ = self.ui.approve_tools(
