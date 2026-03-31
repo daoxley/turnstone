@@ -24,6 +24,7 @@ from turnstone.channels._formatter import chunk_message
 from turnstone.channels._routing import ChannelRouter
 from turnstone.core.log import get_logger
 from turnstone.sdk.events import (
+    ApprovalResolvedEvent,
     ApproveRequestEvent,
     ContentEvent,
     ErrorEvent,
@@ -31,6 +32,10 @@ from turnstone.sdk.events import (
     PlanReviewEvent,
     ServerEvent,
     StreamEndEvent,
+    ThinkingStartEvent,
+    ThinkingStopEvent,
+    ToolInfoEvent,
+    ToolResultEvent,
 )
 
 if TYPE_CHECKING:
@@ -178,6 +183,12 @@ class TurnstoneBot:
         self._subscribed_ws: set[str] = set()
         self._sse_tasks: dict[str, asyncio.Task[None]] = {}
         self._streaming: dict[str, StreamingMessage] = {}
+        # Transient "Thinking..." status messages, deleted when content starts.
+        self._thinking_msgs: dict[str, discord.Message] = {}
+        # Per-tool "running" embeds, edited in-place when the result arrives.
+        # List preserves call order for FIFO matching when the same tool name
+        # appears more than once in a single turn.
+        self._tool_info_msgs: dict[str, list[tuple[str, str, str, discord.Message]]] = {}
         # Track the Discord message containing the pending approval embed per
         # workstream so that IntentVerdictEvent can update it with LLM judge
         # results.
@@ -302,6 +313,11 @@ class TurnstoneBot:
                 await task
         self._subscribed_ws.discard(ws_id)
         self._streaming.pop(ws_id, None)
+        thinking_msg = self._thinking_msgs.pop(ws_id, None)
+        if thinking_msg is not None:
+            with contextlib.suppress(Exception):
+                await thinking_msg.delete()
+        self._tool_info_msgs.pop(ws_id, None)
         self._pending_approval_msgs.pop(ws_id, None)
         self._notify_reply_channels.pop(ws_id, None)
         # Purge stale notification tracking entries for this workstream.
@@ -322,6 +338,11 @@ class TurnstoneBot:
         self._subscribed_ws.discard(ws_id)
         self._sse_tasks.pop(ws_id, None)
         self._streaming.pop(ws_id, None)
+        thinking_msg = self._thinking_msgs.pop(ws_id, None)
+        if thinking_msg is not None:
+            with contextlib.suppress(Exception):
+                await thinking_msg.delete()
+        self._tool_info_msgs.pop(ws_id, None)
         self._pending_approval_msgs.pop(ws_id, None)
         self._notify_reply_channels.pop(ws_id, None)
         stale = [mid for mid, entry in self._notify_ws_map.items() if entry[0] == ws_id]
@@ -391,6 +412,13 @@ class TurnstoneBot:
                 log.debug("discord.sse_remote_closed", ws_id=ws_id)
             except asyncio.CancelledError:
                 return  # unsubscribe or shutdown
+            except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                log.warning(
+                    "discord.sse_connect_failed",
+                    ws_id=ws_id,
+                    url=url,
+                    error=str(exc),
+                )
             except Exception:
                 log.warning("discord.sse_error", ws_id=ws_id, exc_info=True)
 
@@ -416,7 +444,28 @@ class TurnstoneBot:
         )
         from turnstone.channels.discord.views import ApprovalView, PlanReviewView
 
-        if isinstance(event, ContentEvent):
+        if isinstance(event, ThinkingStartEvent):
+            # Clean up any prior thinking message (consecutive starts without stop).
+            prev = self._thinking_msgs.pop(ws_id, None)
+            if prev is not None:
+                with contextlib.suppress(Exception):
+                    await prev.delete()
+            try:
+                msg = await thread.send("*Thinking...*")
+                self._thinking_msgs[ws_id] = msg
+            except Exception:
+                log.debug("discord.thinking_start_send_failed", ws_id=ws_id)
+
+        elif isinstance(event, ThinkingStopEvent):
+            # Leave the thinking message in place — the next visible event
+            # (ContentEvent, ToolInfoEvent, StreamEndEvent) will edit or
+            # clean it up, avoiding a delete→gap→new-message flicker.
+            pass
+
+        elif isinstance(event, ContentEvent):
+            # Reuse thinking message as the initial streaming message so the
+            # first flush edits it in-place (no delete→gap→send flicker).
+            thinking_msg = self._thinking_msgs.pop(ws_id, None)
             sm = self._streaming.get(ws_id)
             if sm is None:
                 sm = StreamingMessage(
@@ -424,8 +473,99 @@ class TurnstoneBot:
                     max_length=self.config.max_message_length,
                     edit_interval=self.config.streaming_edit_interval,
                 )
+                if thinking_msg is not None:
+                    sm._message = thinking_msg
                 self._streaming[ws_id] = sm
+            elif thinking_msg is not None:
+                with contextlib.suppress(Exception):
+                    await thinking_msg.delete()
             await sm.append(event.text)
+
+        elif isinstance(event, ToolInfoEvent):
+            from turnstone.channels._formatter import truncate
+
+            # Reuse the thinking message for the first tool embed.
+            thinking_msg = self._thinking_msgs.pop(ws_id, None)
+
+            # Show a "running" embed for every tool.  The approval dialog
+            # (ApproveRequestEvent) is a separate concern — it asks "do you
+            # authorize this?" while the running embed says "this tool is
+            # executing."  Both can coexist in the thread.
+            for it in event.items:
+                name = it.get("func_name") or it.get("approval_label") or "tool"
+                raw_preview = it.get("preview", "")
+                # Sanitize preview: escape backticks to prevent markdown
+                # breakout and strip @-mentions.
+                raw_preview = raw_preview.replace("`", "\\`")
+                raw_preview = discord.utils.escape_mentions(raw_preview)
+                preview = truncate(raw_preview, max_length=120) or None
+                embed = discord.Embed(
+                    title=name,
+                    description=preview,
+                    color=discord.Color.light_grey(),
+                )
+                # Edit thinking message into first tool embed to avoid flicker.
+                if thinking_msg is not None:
+                    try:
+                        await thinking_msg.edit(content=None, embed=embed)
+                        msg = thinking_msg
+                    except Exception:
+                        msg = await thread.send(embed=embed)
+                    thinking_msg = None
+                else:
+                    msg = await thread.send(embed=embed)
+                call_id = it.get("call_id", "")
+                self._tool_info_msgs.setdefault(ws_id, []).append(
+                    (call_id, name, preview or "", msg)
+                )
+
+            # If no items consumed the thinking message (empty event), clean up.
+            if thinking_msg is not None:
+                with contextlib.suppress(Exception):
+                    await thinking_msg.delete()
+
+        elif isinstance(event, ToolResultEvent):
+            from turnstone.channels._formatter import format_tool_result
+
+            # Mark the matching "running" embed as complete/errored.
+            # Prefer call_id match (deterministic); fall back to name (FIFO).
+            info_list = self._tool_info_msgs.get(ws_id, [])
+            matched_preview = ""
+            matched_msg: discord.Message | None = None
+            if event.call_id:
+                for i, (cid, _tname, _prev, _tmsg) in enumerate(info_list):
+                    if cid == event.call_id:
+                        entry = info_list.pop(i)
+                        matched_preview, matched_msg = entry[2], entry[3]
+                        break
+            if matched_msg is None:
+                for i, (_cid, tname, _prev, _tmsg) in enumerate(info_list):
+                    if tname == event.name:
+                        entry = info_list.pop(i)
+                        matched_preview, matched_msg = entry[2], entry[3]
+                        break
+            if matched_msg is not None:
+                status = "Error" if event.is_error else "Done"
+                status_color = discord.Color.red() if event.is_error else discord.Color.dark_grey()
+                status_embed = discord.Embed(
+                    title=f"{event.name} \u2014 {status}",
+                    description=matched_preview or None,
+                    color=status_color,
+                )
+                try:
+                    await matched_msg.edit(content=None, embed=status_embed)
+                except Exception:
+                    log.debug("discord.tool_info_status_edit_failed", ws_id=ws_id)
+
+            # Send the result as a separate message.
+            desc = format_tool_result(event.output)
+            color = discord.Color.red() if event.is_error else discord.Color.dark_grey()
+            result_embed = discord.Embed(
+                title=event.name,
+                description=desc,
+                color=color,
+            )
+            await thread.send(embed=result_embed)
 
         elif isinstance(event, ApproveRequestEvent):
             # Evaluate admin tool policies before auto-approve.
@@ -539,7 +679,26 @@ class TurnstoneBot:
                 except Exception:
                     log.debug("discord.verdict_embed_edit_failed", ws_id=ws_id)
 
+        elif isinstance(event, ApprovalResolvedEvent):
+            # Server resolved the approval (timeout, external approve/reject).
+            # Disable the buttons so they can't be clicked stale.
+            approval_msg = self._pending_approval_msgs.pop(ws_id, None)
+            if approval_msg is not None:
+                from turnstone.channels.discord.views import disable_message_buttons
+
+                label = "Approved" if event.approved else "Denied"
+                try:
+                    await disable_message_buttons(approval_msg, label)
+                except Exception:
+                    log.debug("discord.approval_resolved_edit_failed", ws_id=ws_id)
+
         elif isinstance(event, StreamEndEvent):
+            # Edge-case cleanup: clear any lingering thinking indicator.
+            thinking_msg = self._thinking_msgs.pop(ws_id, None)
+            if thinking_msg is not None:
+                with contextlib.suppress(Exception):
+                    await thinking_msg.delete()
+            self._tool_info_msgs.pop(ws_id, None)
             sm = self._streaming.pop(ws_id, None)
             if sm is not None:
                 await sm.finalize()

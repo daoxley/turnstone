@@ -139,6 +139,26 @@ def format_plan_review(content: str) -> str:
     return f"**Plan review requested:**\n\n{content}"
 
 
+def format_tool_result(output: str) -> str:
+    """Format a tool result into a compact code-block summary.
+
+    Truncates to the first 10 lines (plus an ellipsis line if trimmed) or
+    500 characters, whichever is shorter.
+    """
+    # Truncate to 10 lines.
+    lines = output.split("\n", 10)
+    if len(lines) > 10:
+        lines = lines[:10]
+        lines.append("\u2026")
+    trimmed = "\n".join(lines)
+    # Escape triple backticks to prevent code-block breakout.
+    trimmed = trimmed.replace("```", "` ` `")
+    # Truncate to 500 chars (after escaping, which can expand the string).
+    if len(trimmed) > 500:
+        trimmed = trimmed[:497] + "\u2026"
+    return f"```\n{trimmed}\n```"
+
+
 def truncate(text: str, max_length: int = 200) -> str:
     """Truncate *text* to *max_length*, appending an ellipsis if trimmed."""
     if len(text) <= max_length:

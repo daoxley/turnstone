@@ -229,13 +229,15 @@ class TestMessageCog:
 
         ts.router.send_message.assert_not_awaited()
 
-    def test_ignores_dms(self):
+    def test_dm_without_reference_sends_guidance(self):
         cog, ts, _bot = self._make_cog()
-        msg = _make_message(guild=False)
+        dm_channel = AsyncMock()
+        msg = _make_message(guild=False, channel=dm_channel)
 
         _run(cog._on_message(msg))
 
         ts.router.send_message.assert_not_awaited()
+        dm_channel.send.assert_awaited_once()
 
     def test_ignores_non_allowed_channels(self):
         cog, ts, _bot = self._make_cog()
@@ -329,6 +331,8 @@ class TestWsEventFinalization:
         bot.config.auto_approve = False
         bot.config.auto_approve_tools = []
         bot._streaming = {}
+        bot._thinking_msgs = {}
+        bot._tool_info_msgs = {}
         bot._pending_approval_msgs = {}
         bot._notify_reply_channels = {}
 
@@ -358,6 +362,8 @@ class TestWsEventFinalization:
 
         bot = MagicMock(spec=TurnstoneBot)
         bot._streaming = {}
+        bot._thinking_msgs = {}
+        bot._tool_info_msgs = {}
         bot._pending_approval_msgs = {}
         bot._notify_reply_channels = {}
         bot._on_ws_event = TurnstoneBot._on_ws_event.__get__(bot, TurnstoneBot)
@@ -391,6 +397,8 @@ class TestApprovalVerdictDisplay:
         bot.config.auto_approve_tools = []
         bot.storage = None
         bot._streaming = {}
+        bot._thinking_msgs = {}
+        bot._tool_info_msgs = {}
         bot._pending_approval_msgs = {}
         bot._notify_reply_channels = {}
         bot._should_auto_approve = MagicMock(return_value=False)
@@ -509,6 +517,8 @@ class TestApprovalVerdictDisplay:
 
         bot = MagicMock(spec=TurnstoneBot)
         bot._streaming = {}
+        bot._thinking_msgs = {}
+        bot._tool_info_msgs = {}
         bot._pending_approval_msgs = {"ws-1": MagicMock()}
         bot._notify_reply_channels = {}
         bot._on_ws_event = TurnstoneBot._on_ws_event.__get__(bot, TurnstoneBot)
@@ -533,6 +543,8 @@ class TestStreamEndBehavior:
         bot.config.auto_approve = False
         bot.config.auto_approve_tools = []
         bot._streaming = {}
+        bot._thinking_msgs = {}
+        bot._tool_info_msgs = {}
         bot._pending_approval_msgs = {}
         bot._notify_reply_channels = {}
         bot._on_ws_event = TurnstoneBot._on_ws_event.__get__(bot, TurnstoneBot)
@@ -702,8 +714,8 @@ class TestNotificationTracking:
         # Should send feedback to the DM channel
         dm_channel.send.assert_awaited_once_with("*This notification is no longer active.*")
 
-    def test_dm_without_reference_ignored(self):
-        """DM without a message reference should be ignored."""
+    def test_dm_without_reference_sends_guidance(self):
+        """DM without a message reference should reply with guidance."""
         from turnstone.channels.discord.cog import MessageCog
 
         bot = MagicMock()
@@ -718,11 +730,15 @@ class TestNotificationTracking:
         bot.turnstone = ts
 
         cog = MessageCog(bot)
-        msg = _make_message(guild=False)  # reference=None
+        dm_channel = AsyncMock()
+        msg = _make_message(guild=False, channel=dm_channel)  # reference=None
 
         _run(cog._on_message(msg))
 
         ts.router.send_message.assert_not_awaited()
+        dm_channel.send.assert_awaited_once()
+        sent_text = dm_channel.send.call_args[0][0]
+        assert "/ask" in sent_text
 
     def test_dm_reply_unlinked_user_ignored(self):
         """DM reply from an unlinked user should be ignored."""
@@ -760,6 +776,8 @@ class TestNotificationTracking:
         bot.config.max_message_length = 2000
         bot.config.streaming_edit_interval = 1.5
         bot._streaming = {}
+        bot._thinking_msgs = {}
+        bot._tool_info_msgs = {}
         bot._pending_approval_msgs = {}
         bot._notify_ws_map = {}
         bot._MAX_NOTIFY_TRACKING = 100
@@ -797,6 +815,8 @@ class TestNotificationTracking:
 
         bot = MagicMock(spec=TurnstoneBot)
         bot._streaming = {}
+        bot._thinking_msgs = {}
+        bot._tool_info_msgs = {}
         bot._pending_approval_msgs = {}
         bot._notify_ws_map = {}
 
@@ -815,6 +835,482 @@ class TestNotificationTracking:
         assert "ws-1" not in bot._notify_reply_channels
         # No response tracked (nothing was sent)
         assert len(bot._notify_ws_map) == 0
+
+
+# ---------------------------------------------------------------------------
+# Formatter: format_tool_result
+# ---------------------------------------------------------------------------
+
+
+class TestFormatToolResult:
+    """Tests for format_tool_result in _formatter.py."""
+
+    def test_basic_output(self):
+        from turnstone.channels._formatter import format_tool_result
+
+        result = format_tool_result("hello world")
+        assert "```" in result
+        assert "hello world" in result
+
+    def test_wraps_in_code_block(self):
+        from turnstone.channels._formatter import format_tool_result
+
+        result = format_tool_result("output text")
+        assert result.startswith("```\n")
+        assert result.endswith("\n```")
+
+    def test_truncates_long_output_by_lines(self):
+        from turnstone.channels._formatter import format_tool_result
+
+        output = "\n".join(f"line {i}" for i in range(20))
+        result = format_tool_result(output)
+        # Should have at most 10 content lines + ellipsis
+        inner = result.split("```")[1]
+        assert inner.strip().count("\n") <= 11
+
+    def test_truncates_long_output_by_chars(self):
+        from turnstone.channels._formatter import format_tool_result
+
+        output = "x" * 600
+        result = format_tool_result(output)
+        # Code block content should be <= 500 chars (497 + ellipsis)
+        inner = result.split("```")[1].strip()
+        assert len(inner) <= 501  # 497 + ellipsis char
+
+    def test_escapes_triple_backticks_in_output(self):
+        from turnstone.channels._formatter import format_tool_result
+
+        output = "before ``` after"
+        result = format_tool_result(output)
+        # Only the opening and closing code fences should remain as ```.
+        assert result.count("```") == 2
+
+
+# ---------------------------------------------------------------------------
+# Thinking indicator lifecycle
+# ---------------------------------------------------------------------------
+
+
+class TestThinkingIndicator:
+    """Tests for ThinkingStart/Stop event handling in the Discord bot."""
+
+    def _make_bot(self):
+        from turnstone.channels.discord.bot import TurnstoneBot
+
+        bot = MagicMock(spec=TurnstoneBot)
+        bot.config = MagicMock()
+        bot.config.max_message_length = 2000
+        bot.config.streaming_edit_interval = 1.5
+        bot.config.auto_approve = False
+        bot.config.auto_approve_tools = []
+        bot.storage = None
+        bot._streaming = {}
+        bot._thinking_msgs = {}
+        bot._tool_info_msgs = {}
+        bot._pending_approval_msgs = {}
+        bot._notify_reply_channels = {}
+        bot._should_auto_approve = MagicMock(return_value=False)
+        bot._on_ws_event = TurnstoneBot._on_ws_event.__get__(bot, TurnstoneBot)
+        return bot
+
+    def test_thinking_start_sends_message(self):
+        from turnstone.sdk.events import ThinkingStartEvent
+
+        bot = self._make_bot()
+        thread = AsyncMock()
+        sent_msg = MagicMock()
+        thread.send = AsyncMock(return_value=sent_msg)
+
+        event = ThinkingStartEvent(ws_id="ws-1")
+        _run(bot._on_ws_event("ws-1", thread, event))
+
+        thread.send.assert_awaited_once_with("*Thinking...*")
+        assert bot._thinking_msgs["ws-1"] is sent_msg
+
+    def test_thinking_stop_preserves_message_for_reuse(self):
+        from turnstone.sdk.events import ThinkingStopEvent
+
+        bot = self._make_bot()
+        thread = AsyncMock()
+        thinking_msg = MagicMock()
+        thinking_msg.delete = AsyncMock()
+        bot._thinking_msgs["ws-1"] = thinking_msg
+
+        event = ThinkingStopEvent(ws_id="ws-1")
+        _run(bot._on_ws_event("ws-1", thread, event))
+
+        # Message kept for next event to reuse via edit.
+        thinking_msg.delete.assert_not_awaited()
+        assert "ws-1" in bot._thinking_msgs
+
+    def test_thinking_stop_without_message_is_noop(self):
+        from turnstone.sdk.events import ThinkingStopEvent
+
+        bot = self._make_bot()
+        thread = AsyncMock()
+
+        event = ThinkingStopEvent(ws_id="ws-1")
+        _run(bot._on_ws_event("ws-1", thread, event))
+
+    def test_content_event_reuses_thinking_message(self):
+        from turnstone.sdk.events import ContentEvent
+
+        bot = self._make_bot()
+        thread = AsyncMock()
+        thinking_msg = MagicMock()
+        thinking_msg.edit = AsyncMock()
+        bot._thinking_msgs["ws-1"] = thinking_msg
+
+        event = ContentEvent(ws_id="ws-1", text="Hello")
+        _run(bot._on_ws_event("ws-1", thread, event))
+
+        # Thinking message becomes the StreamingMessage base — no delete.
+        assert "ws-1" not in bot._thinking_msgs
+        sm = bot._streaming["ws-1"]
+        assert sm._message is thinking_msg
+
+    def test_stream_end_clears_thinking_message(self):
+        from turnstone.sdk.events import StreamEndEvent
+
+        bot = self._make_bot()
+        thread = AsyncMock()
+        thinking_msg = MagicMock()
+        thinking_msg.delete = AsyncMock()
+        bot._thinking_msgs["ws-1"] = thinking_msg
+        bot._notify_reply_channels = {}
+
+        event = StreamEndEvent(ws_id="ws-1")
+        _run(bot._on_ws_event("ws-1", thread, event))
+
+        thinking_msg.delete.assert_awaited_once()
+        assert "ws-1" not in bot._thinking_msgs
+
+
+# ---------------------------------------------------------------------------
+# Tool info / result embeds
+# ---------------------------------------------------------------------------
+
+
+class TestToolInfoEvent:
+    """Tests for ToolInfoEvent handling in the Discord bot."""
+
+    def _make_bot(self):
+        from turnstone.channels.discord.bot import TurnstoneBot
+
+        bot = MagicMock(spec=TurnstoneBot)
+        bot.config = MagicMock()
+        bot.config.max_message_length = 2000
+        bot.config.streaming_edit_interval = 1.5
+        bot.config.auto_approve = False
+        bot.config.auto_approve_tools = []
+        bot.storage = None
+        bot._streaming = {}
+        bot._thinking_msgs = {}
+        bot._tool_info_msgs = {}
+        bot._pending_approval_msgs = {}
+        bot._notify_reply_channels = {}
+        bot._should_auto_approve = MagicMock(return_value=False)
+        bot._on_ws_event = TurnstoneBot._on_ws_event.__get__(bot, TurnstoneBot)
+        return bot
+
+    def test_sends_per_item_embed(self):
+        from turnstone.sdk.events import ToolInfoEvent
+
+        bot = self._make_bot()
+        thread = AsyncMock()
+        sent_msg = MagicMock()
+        thread.send = AsyncMock(return_value=sent_msg)
+
+        items = [{"func_name": "bash", "preview": "ls -la", "needs_approval": False}]
+        event = ToolInfoEvent(ws_id="ws-1", items=items)
+        _run(bot._on_ws_event("ws-1", thread, event))
+
+        thread.send.assert_awaited_once()
+        embed = thread.send.call_args[1]["embed"]
+        assert embed.title == "bash"
+        assert embed.description == "ls -la"
+        # Message tracked for later editing by ToolResultEvent.
+        assert bot._tool_info_msgs["ws-1"] == [("", "bash", "ls -la", sent_msg)]
+
+    def test_multiple_tools_send_multiple_embeds(self):
+        from turnstone.sdk.events import ToolInfoEvent
+
+        bot = self._make_bot()
+        thread = AsyncMock()
+
+        items = [
+            {"func_name": "bash", "preview": "ls", "needs_approval": False},
+            {"func_name": "read_file", "preview": "/etc", "needs_approval": False},
+        ]
+        event = ToolInfoEvent(ws_id="ws-1", items=items)
+        _run(bot._on_ws_event("ws-1", thread, event))
+
+        assert thread.send.await_count == 2
+        assert len(bot._tool_info_msgs["ws-1"]) == 2
+
+    def test_shows_all_items_regardless_of_approval(self):
+        from turnstone.sdk.events import ToolInfoEvent
+
+        bot = self._make_bot()
+        thread = AsyncMock()
+
+        items = [
+            {"func_name": "bash", "preview": "rm -rf /", "needs_approval": True},
+            {"func_name": "read_file", "preview": "/etc/hosts", "needs_approval": False},
+        ]
+        event = ToolInfoEvent(ws_id="ws-1", items=items)
+        _run(bot._on_ws_event("ws-1", thread, event))
+
+        # Both items shown — running indicator is separate from approval dialog.
+        assert thread.send.await_count == 2
+
+    def test_reuses_thinking_message_for_first_tool(self):
+        from turnstone.sdk.events import ToolInfoEvent
+
+        bot = self._make_bot()
+        thread = AsyncMock()
+        thinking_msg = MagicMock()
+        thinking_msg.edit = AsyncMock()
+        bot._thinking_msgs["ws-1"] = thinking_msg
+
+        items = [{"func_name": "bash", "preview": "ls -la", "needs_approval": False}]
+        event = ToolInfoEvent(ws_id="ws-1", items=items)
+        _run(bot._on_ws_event("ws-1", thread, event))
+
+        # Thinking message edited into tool embed, no new message sent.
+        thinking_msg.edit.assert_awaited_once()
+        thread.send.assert_not_awaited()
+        assert "ws-1" not in bot._thinking_msgs
+        # The reused message is tracked for ToolResultEvent editing.
+        assert bot._tool_info_msgs["ws-1"][0][3] is thinking_msg
+
+
+class TestToolResultEvent:
+    """Tests for ToolResultEvent handling in the Discord bot."""
+
+    def _make_bot(self):
+        from turnstone.channels.discord.bot import TurnstoneBot
+
+        bot = MagicMock(spec=TurnstoneBot)
+        bot.config = MagicMock()
+        bot.config.max_message_length = 2000
+        bot.config.streaming_edit_interval = 1.5
+        bot.config.auto_approve = False
+        bot.config.auto_approve_tools = []
+        bot.storage = None
+        bot._streaming = {}
+        bot._thinking_msgs = {}
+        bot._tool_info_msgs = {}
+        bot._pending_approval_msgs = {}
+        bot._notify_reply_channels = {}
+        bot._should_auto_approve = MagicMock(return_value=False)
+        bot._on_ws_event = TurnstoneBot._on_ws_event.__get__(bot, TurnstoneBot)
+        return bot
+
+    def test_marks_info_done_and_sends_result(self):
+        from turnstone.sdk.events import ToolResultEvent
+
+        bot = self._make_bot()
+        thread = AsyncMock()
+
+        # Pre-populate a tool info message (as ToolInfoEvent would).
+        info_msg = MagicMock()
+        info_msg.edit = AsyncMock()
+        bot._tool_info_msgs["ws-1"] = [("", "bash", "ls -la", info_msg)]
+
+        event = ToolResultEvent(ws_id="ws-1", name="bash", output="file1\nfile2")
+        _run(bot._on_ws_event("ws-1", thread, event))
+
+        # Info embed edited to "Done" status.
+        info_msg.edit.assert_awaited_once()
+        status_embed = info_msg.edit.call_args[1]["embed"]
+        assert "Done" in status_embed.title
+        assert status_embed.description == "ls -la"  # preview preserved
+        # Result sent as separate new message.
+        thread.send.assert_awaited_once()
+        result_embed = thread.send.call_args[1]["embed"]
+        assert result_embed.title == "bash"
+        assert "file1" in result_embed.description
+        # Entry consumed from tracking list.
+        assert bot._tool_info_msgs["ws-1"] == []
+
+    def test_result_sent_even_without_info_match(self):
+        from turnstone.sdk.events import ToolResultEvent
+
+        bot = self._make_bot()
+        thread = AsyncMock()
+
+        event = ToolResultEvent(ws_id="ws-1", name="bash", output="file1\nfile2")
+        _run(bot._on_ws_event("ws-1", thread, event))
+
+        thread.send.assert_awaited_once()
+        embed = thread.send.call_args[1]["embed"]
+        assert embed.title == "bash"
+        assert "file1" in embed.description
+
+    def test_error_result_uses_red_color(self):
+        from turnstone.sdk.events import ToolResultEvent
+
+        bot = self._make_bot()
+        thread = AsyncMock()
+
+        event = ToolResultEvent(
+            ws_id="ws-1", name="bash", output="command not found", is_error=True
+        )
+        _run(bot._on_ws_event("ws-1", thread, event))
+
+        embed = thread.send.call_args[1]["embed"]
+        assert embed.color == discord.Color.red()
+
+    def test_success_result_uses_dark_grey_color(self):
+        from turnstone.sdk.events import ToolResultEvent
+
+        bot = self._make_bot()
+        thread = AsyncMock()
+
+        event = ToolResultEvent(ws_id="ws-1", name="bash", output="ok")
+        _run(bot._on_ws_event("ws-1", thread, event))
+
+        embed = thread.send.call_args[1]["embed"]
+        assert embed.color == discord.Color.dark_grey()
+
+    def test_call_id_matching(self):
+        from turnstone.sdk.events import ToolResultEvent
+
+        bot = self._make_bot()
+        thread = AsyncMock()
+
+        first_msg = MagicMock()
+        first_msg.edit = AsyncMock()
+        second_msg = MagicMock()
+        second_msg.edit = AsyncMock()
+        bot._tool_info_msgs["ws-1"] = [
+            ("call-1", "bash", "", first_msg),
+            ("call-2", "bash", "", second_msg),
+        ]
+
+        # Result with call_id matches the correct message regardless of order.
+        event = ToolResultEvent(ws_id="ws-1", call_id="call-2", name="bash", output="result")
+        _run(bot._on_ws_event("ws-1", thread, event))
+        second_msg.edit.assert_awaited_once()
+        first_msg.edit.assert_not_awaited()
+
+    def test_fifo_fallback_when_no_call_id(self):
+        from turnstone.sdk.events import ToolResultEvent
+
+        bot = self._make_bot()
+        thread = AsyncMock()
+
+        first_msg = MagicMock()
+        first_msg.edit = AsyncMock()
+        second_msg = MagicMock()
+        second_msg.edit = AsyncMock()
+        bot._tool_info_msgs["ws-1"] = [("", "bash", "", first_msg), ("", "bash", "", second_msg)]
+
+        # No call_id — falls back to FIFO name match.
+        event1 = ToolResultEvent(ws_id="ws-1", name="bash", output="result1")
+        _run(bot._on_ws_event("ws-1", thread, event1))
+        first_msg.edit.assert_awaited_once()
+        second_msg.edit.assert_not_awaited()
+
+        event2 = ToolResultEvent(ws_id="ws-1", name="bash", output="result2")
+        _run(bot._on_ws_event("ws-1", thread, event2))
+        second_msg.edit.assert_awaited_once()
+
+    def test_edit_failure_falls_back_to_send(self):
+        from turnstone.sdk.events import ToolResultEvent
+
+        bot = self._make_bot()
+        thread = AsyncMock()
+
+        info_msg = MagicMock()
+        info_msg.edit = AsyncMock(side_effect=Exception("Discord API error"))
+        bot._tool_info_msgs["ws-1"] = [("", "bash", "ls -la", info_msg)]
+
+        event = ToolResultEvent(ws_id="ws-1", name="bash", output="ok")
+        _run(bot._on_ws_event("ws-1", thread, event))
+
+        # Edit failed, should fall back to send.
+        info_msg.edit.assert_awaited_once()
+        thread.send.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Approval resolved (timeout / external resolution)
+# ---------------------------------------------------------------------------
+
+
+class TestApprovalResolved:
+    """ApprovalResolvedEvent should disable buttons on the pending approval embed."""
+
+    def _make_bot(self):
+        from turnstone.channels.discord.bot import TurnstoneBot
+
+        bot = MagicMock(spec=TurnstoneBot)
+        bot.config = MagicMock()
+        bot.config.max_message_length = 2000
+        bot.config.streaming_edit_interval = 1.5
+        bot.config.auto_approve = False
+        bot.config.auto_approve_tools = []
+        bot.storage = None
+        bot._streaming = {}
+        bot._thinking_msgs = {}
+        bot._tool_info_msgs = {}
+        bot._pending_approval_msgs = {}
+        bot._notify_reply_channels = {}
+        bot._should_auto_approve = MagicMock(return_value=False)
+        bot._on_ws_event = TurnstoneBot._on_ws_event.__get__(bot, TurnstoneBot)
+        return bot
+
+    def test_disables_buttons_on_timeout(self):
+        from turnstone.sdk.events import ApprovalResolvedEvent
+
+        bot = self._make_bot()
+        thread = AsyncMock()
+
+        # Set up a pending approval message with components.
+        approval_msg = MagicMock()
+        approval_msg.embeds = [MagicMock()]
+        approval_msg.components = []
+        approval_msg.edit = AsyncMock()
+        bot._pending_approval_msgs["ws-1"] = approval_msg
+
+        event = ApprovalResolvedEvent(ws_id="ws-1", approved=False, feedback="timeout")
+        _run(bot._on_ws_event("ws-1", thread, event))
+
+        approval_msg.edit.assert_awaited_once()
+        # Pending approval message should be removed.
+        assert "ws-1" not in bot._pending_approval_msgs
+
+    def test_disables_buttons_on_approved(self):
+        from turnstone.sdk.events import ApprovalResolvedEvent
+
+        bot = self._make_bot()
+        thread = AsyncMock()
+
+        approval_msg = MagicMock()
+        approval_msg.embeds = [MagicMock()]
+        approval_msg.components = []
+        approval_msg.edit = AsyncMock()
+        bot._pending_approval_msgs["ws-1"] = approval_msg
+
+        event = ApprovalResolvedEvent(ws_id="ws-1", approved=True)
+        _run(bot._on_ws_event("ws-1", thread, event))
+
+        approval_msg.edit.assert_awaited_once()
+        # Check the embed title was updated with "Approved".
+        edited_embed = approval_msg.edit.call_args[1]["embed"]
+        assert "Approved" in edited_embed.title
+
+    def test_no_pending_approval_is_noop(self):
+        from turnstone.sdk.events import ApprovalResolvedEvent
+
+        bot = self._make_bot()
+        thread = AsyncMock()
+
+        event = ApprovalResolvedEvent(ws_id="ws-1", approved=False)
+        _run(bot._on_ws_event("ws-1", thread, event))
+        # No error, no state change.
 
 
 class TestChannelCLI:
