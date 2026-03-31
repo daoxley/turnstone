@@ -2,3 +2,18 @@
 # https://avd.aquasec.com/nvd/cve-2026-25210
 # Review: remove this entry once a patched libexpat1 is published
 CVE-2026-25210
+
+# ncurses buffer overflow — no fix in Debian 13 repos yet
+# Affects libncursesw6, libtinfo6, ncurses-base, ncurses-bin
+# https://avd.aquasec.com/nvd/cve-2025-69720
+CVE-2025-69720
+
+# nghttp2 DoS via malformed HTTP/2 frames — no fix in Debian 13 repos yet
+# Affects libnghttp2-14
+# https://avd.aquasec.com/nvd/cve-2026-27135
+CVE-2026-27135
+
+# systemd arbitrary code execution via spurious IPC — no fix in Debian 13 repos yet
+# Affects libsystemd0, libudev1
+# https://avd.aquasec.com/nvd/cve-2026-29111
+CVE-2026-29111
