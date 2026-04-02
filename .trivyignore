@@ -22,3 +22,19 @@ CVE-2026-29111
 # Affects libc-bin, libc6
 # https://avd.aquasec.com/nvd/cve-2026-4046
 CVE-2026-4046
+
+# minimatch ReDoS — transitive npm dep (MCP server), no direct exposure
+# https://avd.aquasec.com/nvd/cve-2026-27903
+CVE-2026-27903
+# https://avd.aquasec.com/nvd/cve-2026-27904
+CVE-2026-27904
+
+# picomatch ReDoS — transitive npm dep, no direct exposure
+# https://avd.aquasec.com/nvd/cve-2026-33671
+CVE-2026-33671
+
+# node-tar path traversal — transitive npm dep, not used to extract untrusted archives
+# https://avd.aquasec.com/nvd/cve-2026-29786
+CVE-2026-29786
+# https://avd.aquasec.com/nvd/cve-2026-31802
+CVE-2026-31802
