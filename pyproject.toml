@@ -12,7 +12,7 @@ requires-python = ">=3.11"
 authors = [{name = "Patrick Buckley", email = "buckleypm@gmail.com"}]
 keywords = ["ai", "chat", "llm", "agent", "tools", "openai"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
