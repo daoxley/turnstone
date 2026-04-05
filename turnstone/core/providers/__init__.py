@@ -38,11 +38,12 @@ _provider_lock = threading.Lock()
 _openai_provider = OpenAIResponsesProvider()
 _openai_compat_provider = OpenAIChatCompletionsProvider()
 _anthropic_provider: LLMProvider | None = None
+_google_provider: LLMProvider | None = None
 
 
 def create_provider(provider_name: str) -> LLMProvider:
     """Return a provider adapter for the given provider name. Thread-safe."""
-    global _anthropic_provider  # noqa: PLW0603
+    global _anthropic_provider, _google_provider  # noqa: PLW0603
     if provider_name == "openai":
         return _openai_provider
     if provider_name == "openai-compatible":
@@ -54,14 +55,22 @@ def create_provider(provider_name: str) -> LLMProvider:
 
                 _anthropic_provider = AnthropicProvider()
             return _anthropic_provider
+    if provider_name == "google":
+        with _provider_lock:
+            if _google_provider is None:
+                from turnstone.core.providers._google import GoogleProvider
+
+                _google_provider = GoogleProvider()
+            return _google_provider
     raise ValueError(
-        f"Unknown provider: {provider_name!r}. Supported: openai, anthropic, openai-compatible"
+        f"Unknown provider: {provider_name!r}. "
+        "Supported: openai, anthropic, google, openai-compatible"
     )
 
 
 def create_client(provider_name: str, *, base_url: str, api_key: str) -> Any:
     """Create an SDK client for the given provider."""
-    if provider_name in ("openai", "openai-compatible"):
+    if provider_name in ("openai", "openai-compatible", "google"):
         from openai import OpenAI
 
         if base_url:
@@ -76,7 +85,8 @@ def create_client(provider_name: str, *, base_url: str, api_key: str) -> Any:
             kwargs["base_url"] = base_url
         return anthropic.Anthropic(**kwargs)
     raise ValueError(
-        f"Unknown provider: {provider_name!r}. Supported: openai, anthropic, openai-compatible"
+        f"Unknown provider: {provider_name!r}. "
+        "Supported: openai, anthropic, google, openai-compatible"
     )
 
 
@@ -113,4 +123,5 @@ def list_known_models(provider: str) -> list[str]:
         from turnstone.core.providers._anthropic import _ANTHROPIC_CAPABILITIES
 
         return sorted(_ANTHROPIC_CAPABILITIES.keys())
+    # Google models change frequently — no static table.
     return []
