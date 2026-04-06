@@ -1976,7 +1976,12 @@ var _ctxMenu = null;
 var _ctxCloseHandler = null;
 var _ctxTriggerElement = null;
 
+var _tabDropdown = null;
+var _tabDropdownCloseHandler = null;
+var _tabDropdownTrigger = null;
+
 function showPaneContextMenu(x, y, paneId) {
+  closeTabDropdown();
   closePaneContextMenu();
   _ctxTriggerElement = document.activeElement;
 
@@ -2120,6 +2125,178 @@ function closePaneContextMenu() {
   if (_ctxTriggerElement && document.contains(_ctxTriggerElement)) {
     _ctxTriggerElement.focus();
     _ctxTriggerElement = null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+//  3c. Tab dropdown menu (per-tab workstream actions)
+// ---------------------------------------------------------------------------
+
+function showTabDropdown(chevronEl, wsId) {
+  closePaneContextMenu();
+  closeTabDropdown();
+  _tabDropdownTrigger = chevronEl;
+  chevronEl.setAttribute("aria-expanded", "true");
+
+  var menu = document.createElement("div");
+  menu.className = "ws-tab-dropdown";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", "Workstream actions");
+  menu.addEventListener("contextmenu", function (e) {
+    e.preventDefault();
+  });
+
+  var isLastWs = Object.keys(workstreams).length <= 1;
+  var items = [
+    {
+      label: "Refresh title",
+      cls: "mobile-hide",
+      action: function () {
+        refreshWorkstreamTitle(wsId);
+      },
+    },
+    {
+      label: "Edit title",
+      key: "Ctrl+Shift+E",
+      action: function () {
+        editWorkstreamTitle(wsId);
+      },
+    },
+    {
+      label: "Fork",
+      key: "Ctrl+Shift+F",
+      action: function () {
+        forkWorkstream(wsId);
+      },
+    },
+    {
+      label: "Close",
+      key: "Ctrl+W",
+      disabled: isLastWs,
+      action: function () {
+        closeWorkstream(wsId);
+      },
+    },
+    { separator: true },
+    {
+      label: "Delete",
+      key: "Ctrl+Shift+X",
+      cls: "destructive",
+      disabled: isLastWs,
+      action: function () {
+        confirmDeleteWorkstream(wsId);
+      },
+    },
+  ];
+
+  items.forEach(function (item) {
+    if (item.separator) {
+      var sep = document.createElement("div");
+      sep.className = "ws-tab-dropdown-sep";
+      sep.setAttribute("role", "separator");
+      menu.appendChild(sep);
+      return;
+    }
+    var btn = document.createElement("button");
+    btn.className = "ws-tab-dropdown-item" + (item.cls ? " " + item.cls : "");
+    btn.setAttribute("role", "menuitem");
+    btn.setAttribute("tabindex", "-1");
+    if (item.disabled) {
+      btn.setAttribute("aria-disabled", "true");
+      btn.setAttribute(
+        "title",
+        "Cannot " + item.label.toLowerCase() + " the last workstream",
+      );
+    }
+    var labelSpan = document.createElement("span");
+    labelSpan.className = "ws-tab-dropdown-label";
+    labelSpan.textContent = item.label;
+    btn.appendChild(labelSpan);
+    if (item.key) {
+      var keySpan = document.createElement("span");
+      keySpan.className = "ws-tab-dropdown-key";
+      keySpan.textContent = item.key;
+      keySpan.setAttribute("aria-hidden", "true");
+      btn.appendChild(keySpan);
+    }
+    btn.onclick = function () {
+      if (this.getAttribute("aria-disabled") === "true") return;
+      closeTabDropdown();
+      item.action();
+    };
+    menu.appendChild(btn);
+  });
+
+  document.body.appendChild(menu);
+
+  // Position below chevron, right-aligned
+  var cr = chevronEl.getBoundingClientRect();
+  var mr = menu.getBoundingClientRect();
+  var mx = cr.right - mr.width;
+  var my = cr.bottom + 2;
+  if (mx < 0) mx = 4;
+  if (my + mr.height > window.innerHeight) my = cr.top - mr.height - 2;
+  if (mx + mr.width > window.innerWidth) mx = window.innerWidth - mr.width - 4;
+  menu.style.left = mx + "px";
+  menu.style.top = my + "px";
+  _tabDropdown = menu;
+
+  _tabDropdownCloseHandler = function (e) {
+    if (e.type === "keydown") {
+      if (e.key === "Escape" || e.key === "Tab") {
+        e.preventDefault();
+        closeTabDropdown();
+      } else if (
+        e.key === "ArrowDown" ||
+        e.key === "ArrowUp" ||
+        e.key === "Home" ||
+        e.key === "End"
+      ) {
+        e.preventDefault();
+        var btns = Array.from(menu.querySelectorAll(".ws-tab-dropdown-item"));
+        if (!btns.length) return;
+        var idx = btns.indexOf(document.activeElement);
+        if (e.key === "ArrowDown") btns[(idx + 1) % btns.length].focus();
+        else if (e.key === "ArrowUp")
+          btns[(idx - 1 + btns.length) % btns.length].focus();
+        else if (e.key === "Home") btns[0].focus();
+        else if (e.key === "End") btns[btns.length - 1].focus();
+      }
+    } else if (
+      e.type === "mousedown" &&
+      !menu.contains(e.target) &&
+      e.target !== chevronEl
+    ) {
+      closeTabDropdown();
+    }
+  };
+  var closeHandler = _tabDropdownCloseHandler;
+  var activeMenu = menu;
+  setTimeout(function () {
+    if (_tabDropdown !== activeMenu || !closeHandler) return;
+    document.addEventListener("mousedown", closeHandler);
+    document.addEventListener("keydown", closeHandler);
+    var first = activeMenu.querySelector(".ws-tab-dropdown-item");
+    if (first) first.focus();
+  }, 0);
+}
+
+function closeTabDropdown() {
+  if (_tabDropdown) {
+    _tabDropdown.remove();
+    _tabDropdown = null;
+  }
+  if (_tabDropdownCloseHandler) {
+    document.removeEventListener("mousedown", _tabDropdownCloseHandler);
+    document.removeEventListener("keydown", _tabDropdownCloseHandler);
+    _tabDropdownCloseHandler = null;
+  }
+  if (_tabDropdownTrigger) {
+    _tabDropdownTrigger.setAttribute("aria-expanded", "false");
+    if (document.contains(_tabDropdownTrigger)) {
+      _tabDropdownTrigger.focus();
+    }
+    _tabDropdownTrigger = null;
   }
 }
 
@@ -2278,6 +2455,7 @@ var tabList = document.getElementById("tab-list");
 var newTabBtn = document.getElementById("new-tab-btn");
 
 function renderTabBar() {
+  closeTabDropdown();
   tabList.querySelectorAll(".ws-tab").forEach(function (t) {
     t.remove();
   });
@@ -2292,7 +2470,7 @@ function renderTabBar() {
     tab.setAttribute("tabindex", "0");
     tab.setAttribute("aria-selected", wsId === currentWsId ? "true" : "false");
     tab.onclick = function (e) {
-      if (e.target.classList.contains("tab-close")) return;
+      if (e.target.classList.contains("tab-chevron")) return;
       switchTab(wsId);
     };
     tab.onkeydown = function (e) {
@@ -2318,23 +2496,28 @@ function renderTabBar() {
     wsidBadge.textContent = wsId.substring(0, 7);
     tab.appendChild(wsidBadge);
 
-    var close = document.createElement("button");
-    close.className = "tab-close";
-    close.innerHTML = "&times;";
-    close.title = "Close workstream";
-    close.setAttribute(
+    var chevron = document.createElement("button");
+    chevron.className = "tab-chevron";
+    chevron.textContent = "\u25BE";
+    chevron.title = "Workstream actions";
+    chevron.setAttribute(
       "aria-label",
-      "Close " + (ws.name || wsId.substring(0, 6)),
+      "Actions for " + (ws.name || wsId.substring(0, 6)),
     );
-    close.onclick = function (e) {
+    chevron.setAttribute("aria-haspopup", "menu");
+    chevron.setAttribute("aria-expanded", "false");
+    chevron.onclick = function (e) {
       e.stopPropagation();
-      closeWorkstream(wsId);
+      if (_tabDropdown && _tabDropdownTrigger === chevron) {
+        closeTabDropdown();
+      } else {
+        showTabDropdown(chevron, wsId);
+      }
     };
-    tab.appendChild(close);
+    tab.appendChild(chevron);
 
     tabList.appendChild(tab);
   });
-  updateWsActionButtons();
 }
 
 function updateTabIndicator(wsId, state, extra) {
@@ -2387,6 +2570,7 @@ function updateTabIndicator(wsId, state, extra) {
 }
 
 function switchTab(wsId) {
+  closeTabDropdown();
   var pane = getFocusedPane();
   if (!pane) return;
   if (wsId === pane.wsId && !dashboardVisible) return;
@@ -2416,8 +2600,6 @@ function switchTab(wsId) {
   pane.updateWsName();
   renderTabBar();
   pane.connectSSE(wsId);
-  updateWsActionButtons();
-  _applyTitleButtonState();
 
   if (!_historyNavigation) {
     history.pushState({ turnstone: "workstream", wsId: wsId }, "");
@@ -2809,7 +2991,6 @@ function closeWorkstream(wsId) {
           loadDashboard();
           showDashboard();
         }
-        updateWsActionButtons();
       } else if (data.error) {
         showToast(data.error, "warning");
       }
@@ -3328,11 +3509,9 @@ function confirmWsDelete() {
 
 var _lastActiveWsId = null;
 
-function refreshWorkstreamTitle() {
-  var wsId = getCurrentWsId();
+function refreshWorkstreamTitle(optWsId) {
+  var wsId = optWsId || getCurrentWsId();
   if (!wsId) return;
-
-  _setTitleState(wsId, "refreshing");
 
   var url =
     "/v1/api/workstreams/" + encodeURIComponent(wsId) + "/refresh-title";
@@ -3348,47 +3527,13 @@ function refreshWorkstreamTitle() {
     })
     .catch(function (err) {
       showToast(err.message || "Failed to refresh title", "error");
-      _setTitleState(wsId, "idle");
     });
-}
-
-// --- Per-workstream title state tracking ---
-
-var _wsTitleState = {}; // { wsId: "idle" | "refreshing" | "error" }
-
-function _setTitleState(wsId, state) {
-  if (state === "idle" || state === "error") delete _wsTitleState[wsId];
-  else _wsTitleState[wsId] = state;
-  _applyTitleButtonState();
-}
-
-function _applyTitleButtonState() {
-  var btn = document.getElementById("refresh-title-btn");
-  if (!btn) return;
-  var wsId = getCurrentWsId();
-  var state = _wsTitleState[wsId] || "idle";
-  if (state === "refreshing") {
-    btn.innerHTML = "&#x23f3;";
-    btn.disabled = true;
-  } else if (state === "error") {
-    btn.innerHTML = "&#x2717;";
-    btn.disabled = false;
-    btn.onclick = function () {
-      _setTitleState(wsId, "idle");
-      refreshWorkstreamTitle();
-    };
-    return;
-  } else {
-    btn.innerHTML = "&#x21bb;";
-    btn.disabled = false;
-    btn.onclick = refreshWorkstreamTitle;
-  }
 }
 
 var _editTitleTrap = null;
 
-function editWorkstreamTitle() {
-  var wsId = getCurrentWsId();
+function editWorkstreamTitle(optWsId) {
+  var wsId = optWsId || getCurrentWsId();
   if (!wsId) return;
   var currentTitle = "";
   var tabEl = document.querySelector(
@@ -3440,8 +3585,8 @@ function cancelEditTitle() {
     document.removeEventListener("keydown", _editTitleTrap);
     _editTitleTrap = null;
   }
-  var btn = document.getElementById("edit-title-btn");
-  if (btn) btn.focus();
+  var chevron = document.querySelector(".ws-tab.active .tab-chevron");
+  if (chevron) chevron.focus();
 }
 
 function submitEditTitle() {
@@ -3487,9 +3632,10 @@ function submitEditTitle() {
 var _pendingDeleteWsId = null;
 var _deleteWsTrap = null;
 
-function confirmDeleteWorkstream() {
-  var wsId = getCurrentWsId();
+function confirmDeleteWorkstream(optWsId) {
+  var wsId = optWsId || getCurrentWsId();
   if (!wsId) return;
+  if (Object.keys(workstreams).length <= 1) return;
   var tabEl = document.querySelector(
     '.ws-tab[data-ws-id="' + wsId + '"] .tab-name',
   );
@@ -3536,9 +3682,9 @@ function cancelDeleteWs() {
     document.removeEventListener("keydown", _deleteWsTrap);
     _deleteWsTrap = null;
   }
-  var btn = document.getElementById("delete-ws-btn");
-  if (btn && btn.offsetParent !== null) {
-    btn.focus();
+  var chevron = document.querySelector(".ws-tab.active .tab-chevron");
+  if (chevron) {
+    chevron.focus();
   } else {
     var fallback = document.getElementById("new-tab-btn");
     if (fallback) fallback.focus();
@@ -3568,7 +3714,6 @@ function executeDeleteWs() {
         loadDashboard();
         showDashboard();
       }
-      updateWsActionButtons();
       showToast("Workstream deleted", "success");
     })
     .catch(function (err) {
@@ -3582,15 +3727,8 @@ function getCurrentWsId() {
   return "";
 }
 
-function updateWsActionButtons() {
-  var group = document.getElementById("ws-action-group");
-  if (group) {
-    group.classList.toggle("hidden", !getCurrentWsId());
-  }
-}
-
-function forkWorkstream() {
-  var wsId = getCurrentWsId();
+function forkWorkstream(optWsId) {
+  var wsId = optWsId || getCurrentWsId();
   if (!wsId) return;
   showNewWsModal(wsId);
 }
@@ -3742,8 +3880,6 @@ function connectGlobalSSE() {
       for (var id in panes) {
         if (panes[id].wsId === data.ws_id) panes[id].updateWsName();
       }
-      // Title generation completed — reset state
-      _setTitleState(data.ws_id, "idle");
     } else if (data.type === "ws_created") {
       workstreams[data.ws_id] = workstreams[data.ws_id] || {};
       workstreams[data.ws_id].name = data.name || data.ws_id.slice(0, 6);
@@ -4548,13 +4684,9 @@ document.addEventListener("keydown", function (e) {
   // is active, so native browser shortcuts (e.g. Ctrl+Shift+R hard reload)
   // still work when no workstream is focused.
   if (e.ctrlKey && e.shiftKey) {
+    closeTabDropdown();
     var wsActionKey = e.key.toLowerCase();
     var activeWsId = !dashboardVisible && getCurrentWsId();
-    if (wsActionKey === "r" && activeWsId) {
-      e.preventDefault();
-      refreshWorkstreamTitle();
-      return;
-    }
     if (wsActionKey === "e" && activeWsId) {
       e.preventDefault();
       editWorkstreamTitle();
@@ -4566,7 +4698,11 @@ document.addEventListener("keydown", function (e) {
       return;
     }
     // X not D — D conflicts with Chrome DevTools
-    if (wsActionKey === "x" && activeWsId) {
+    if (
+      wsActionKey === "x" &&
+      activeWsId &&
+      Object.keys(workstreams).length > 1
+    ) {
       e.preventDefault();
       confirmDeleteWorkstream();
       return;
@@ -4574,6 +4710,7 @@ document.addEventListener("keydown", function (e) {
   }
   // Ctrl+W: close current workstream tab
   if (e.ctrlKey && !e.shiftKey && e.key === "w") {
+    closeTabDropdown();
     if (Object.keys(workstreams).length > 1) {
       e.preventDefault();
       closeWorkstream(currentWsId);
