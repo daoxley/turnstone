@@ -252,8 +252,30 @@ Pane.prototype.disconnectSSE = function () {
 Pane.prototype.setBusy = function (b) {
   this.busy = b;
   this.messagesEl.dataset.busy = b ? "true" : "false";
-  this.sendBtn.disabled = b;
-  this.sendBtn.style.display = b ? "none" : "";
+  // Keep send button enabled during busy — allows queuing messages
+  this.sendBtn.disabled = false;
+  this.sendBtn.style.display = "";
+  if (b) {
+    this.sendBtn.textContent = "Queue";
+    this.sendBtn.setAttribute(
+      "aria-label",
+      "Queue message for delivery after current execution",
+    );
+    this.sendBtn.classList.add("queue-mode");
+    this.inputEl.placeholder = "Queue a message\u2026 (!!! for urgent)";
+  } else {
+    this.sendBtn.textContent = "Send";
+    this.sendBtn.setAttribute("aria-label", "Send message");
+    this.sendBtn.classList.remove("queue-mode");
+    this.inputEl.placeholder = "Type a message\u2026";
+    // Promote queued messages to normal appearance on idle
+    var queuedMsgs = this.messagesEl.querySelectorAll(".msg-queued");
+    for (var i = 0; i < queuedMsgs.length; i++) {
+      queuedMsgs[i].classList.remove("msg-queued", "msg-queued-important");
+      var badge = queuedMsgs[i].querySelector(".queued-badge");
+      if (badge) badge.remove();
+    }
+  }
   this.stopBtn.style.display = b ? "" : "none";
   this.stopBtn.disabled = !b;
   this.stopBtn.textContent = "\u25a0 Stop";
@@ -522,6 +544,11 @@ Pane.prototype.handleEvent = function (evt) {
       this.addErrorMessage(evt.message);
       break;
 
+    case "message_queued":
+      // Confirmation from server that a queued message was accepted.
+      // The UI already showed the message optimistically in addQueuedMessage.
+      break;
+
     case "busy_error":
       // Server is still busy — don't transition to send mode.
       // Re-enable the stop button so the user can try cancelling.
@@ -634,6 +661,63 @@ Pane.prototype.addUserMessage = function (text) {
   this._addUserMsgActions(el, text);
   this.messagesEl.appendChild(el);
   this.scrollToBottom(true);
+};
+
+Pane.prototype.addQueuedMessage = function (text, priority) {
+  this.removeEmptyState();
+  var self = this;
+  var el = document.createElement("div");
+  el.className = "msg msg-user msg-queued";
+  el.setAttribute("role", "status");
+  if (priority === "important") {
+    el.classList.add("msg-queued-important");
+    el.setAttribute("aria-label", "Important message queued: " + text);
+  } else {
+    el.setAttribute("aria-label", "Message queued: " + text);
+  }
+  var badge = document.createElement("span");
+  badge.className = "queued-badge";
+  badge.setAttribute("aria-hidden", "true");
+  badge.textContent = priority === "important" ? "queued (!!!) " : "queued ";
+  el.appendChild(badge);
+  el.appendChild(document.createTextNode(text));
+  // Dismiss button — remove from queue before injection
+  var dismiss = document.createElement("button");
+  dismiss.className = "queued-dismiss";
+  dismiss.title = "Remove from queue";
+  dismiss.setAttribute("aria-label", "Remove queued message");
+  dismiss.textContent = "\u00d7";
+  dismiss.addEventListener("click", function (e) {
+    e.stopPropagation();
+    self._dequeueMessage(el);
+  });
+  el.appendChild(dismiss);
+  this.messagesEl.appendChild(el);
+  this.scrollToBottom(true);
+  return el;
+};
+
+Pane.prototype._dequeueMessage = function (el) {
+  var msgId = el.dataset.msgId;
+  if (!msgId) {
+    // ID not yet set from server response — remove optimistically
+    el.remove();
+    return;
+  }
+  authFetch("/v1/api/send", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ws_id: this.wsId, msg_id: msgId }),
+  })
+    .then(function (r) {
+      return r.json();
+    })
+    .then(function () {
+      el.remove();
+    })
+    .catch(function () {
+      el.remove();
+    });
 };
 
 Pane.prototype._addUserMsgActions = function (el, text) {
@@ -1466,9 +1550,10 @@ Pane.prototype.scrollToBottom = function (force) {
 
 Pane.prototype.sendMessage = function () {
   var text = this.inputEl.value.trim();
-  if (!text || this.busy) return;
+  if (!text) return;
 
   if (text.startsWith("/")) {
+    if (this.busy) return; // commands not allowed while busy
     authFetch("/v1/api/command", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1481,8 +1566,23 @@ Pane.prototype.sendMessage = function () {
   }
 
   var self = this;
-  this.setBusy(true);
-  this.addUserMessage(text);
+  var isBusy = this.busy;
+  var queuedEl = null;
+
+  if (isBusy) {
+    // Queue message for injection at the next tool-result seam.
+    // Strip !!! prefix for display, show priority badge instead.
+    var displayText = text;
+    var priority = "notice";
+    if (text.startsWith("!!!")) {
+      displayText = text.slice(3).trimStart();
+      priority = "important";
+    }
+    queuedEl = this.addQueuedMessage(displayText, priority);
+  } else {
+    this.setBusy(true);
+    this.addUserMessage(text);
+  }
   this.inputEl.value = "";
   this._autoResize();
 
@@ -1490,10 +1590,27 @@ Pane.prototype.sendMessage = function () {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message: text, ws_id: this.wsId }),
-  }).catch(function (err) {
-    self.addErrorMessage("Connection error: " + err.message);
-    self.setBusy(false);
-  });
+  })
+    .then(function (r) {
+      return r.json();
+    })
+    .then(function (data) {
+      if (data.status === "queued" && data.msg_id && queuedEl) {
+        queuedEl.dataset.msgId = data.msg_id;
+      } else if (data.status === "busy") {
+        if (queuedEl) queuedEl.remove();
+        self.addErrorMessage("Server is busy. Please wait.");
+        if (!isBusy) self.setBusy(false);
+      } else if (data.status === "queue_full") {
+        if (queuedEl) queuedEl.remove();
+        self.addErrorMessage("Message queue full. Please wait.");
+      }
+    })
+    .catch(function (err) {
+      if (queuedEl) queuedEl.remove();
+      self.addErrorMessage("Connection error: " + err.message);
+      if (!isBusy) self.setBusy(false);
+    });
 };
 
 Pane.prototype.cancelGeneration = function () {
