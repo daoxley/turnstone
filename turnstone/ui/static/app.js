@@ -284,6 +284,8 @@ Pane.prototype._promoteQueuedMessages = function () {
     var el = queuedMsgs[i];
     el.classList.remove("msg-queued", "msg-queued-important");
     delete el.dataset.msgId;
+    el.removeAttribute("role");
+    el.removeAttribute("aria-label");
     var badge = el.querySelector(".queued-badge");
     if (badge) badge.remove();
     var dismiss = el.querySelector(".queued-dismiss");
@@ -708,7 +710,8 @@ Pane.prototype.addQueuedMessage = function (text, priority) {
 Pane.prototype._dequeueMessage = function (el) {
   var msgId = el.dataset.msgId;
   if (!msgId) {
-    // ID not yet set from server response — remove optimistically
+    // ID not yet set — mark for deferred DELETE when send response arrives
+    el.dataset.pendingDismiss = "true";
     el.remove();
     return;
   }
@@ -1608,7 +1611,16 @@ Pane.prototype.sendMessage = function () {
     })
     .then(function (data) {
       if (data.status === "queued" && data.msg_id && queuedEl) {
-        queuedEl.dataset.msgId = data.msg_id;
+        if (queuedEl.dataset.pendingDismiss) {
+          // User dismissed before ID arrived — send deferred DELETE
+          authFetch("/v1/api/send", {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ws_id: self.wsId, msg_id: data.msg_id }),
+          });
+        } else {
+          queuedEl.dataset.msgId = data.msg_id;
+        }
       } else if (data.status === "busy") {
         if (queuedEl) queuedEl.remove();
         self.addErrorMessage("Server is busy. Please wait.");
