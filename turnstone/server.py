@@ -3715,15 +3715,15 @@ def main() -> None:
 
     cors_origins = parse_cors_origins()
 
-    # Construct advertise URL for service registration.
-    # In Docker/k8s, socket.gethostname() returns the container ID which
-    # isn't DNS-resolvable by other containers.  Priority:
-    # 1. TURNSTONE_ADVERTISE_URL env var (explicit override)
+    # Construct advertise URL for service registration.  Priority:
+    # 1. TURNSTONE_ADVERTISE_URL env var (required in Docker/k8s where
+    #    gethostname() returns a container ID that peers can't resolve)
     # 2. Explicit --host (not a wildcard bind address)
-    # 3. socket.getfqdn() (may work in k8s with proper DNS)
+    # 3. socket.gethostname() (bare-metal fallback; getfqdn() does
+    #    reverse DNS which often truncates the hostname)
     _advertise_url = os.environ.get("TURNSTONE_ADVERTISE_URL", "")
     if not _advertise_url:
-        _advertise_host = args.host if args.host not in ("0.0.0.0", "::") else socket.getfqdn()
+        _advertise_host = args.host if args.host not in ("0.0.0.0", "::") else socket.gethostname()
         _advertise_url = f"http://{_advertise_host}:{args.port}"
 
     _skip_perms = config_store.get("tools.skip_permissions")
@@ -3793,8 +3793,11 @@ def main() -> None:
 
             from turnstone.core.tls import TLSClient
 
-            hostname = socket.getfqdn()
+            hostname = socket.gethostname()
+            fqdn = socket.getfqdn()
             hostnames = [hostname, "localhost", "127.0.0.1"]
+            if fqdn != hostname:
+                hostnames.append(fqdn)
             # Only add bind host if it's a concrete address
             if args.host not in ("0.0.0.0", "::", ""):
                 hostnames.append(args.host)
