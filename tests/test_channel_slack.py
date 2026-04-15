@@ -146,7 +146,7 @@ class TestStreamingMessage:
         client = AsyncMock()
         client.chat_postMessage = AsyncMock(return_value={"ok": True, "ts": "123"})
         client.chat_update = AsyncMock(return_value={"ok": True})
-        
+
         sm = StreamingMessage(client=client, channel="C1", edit_interval=999.0)
 
         _run(sm.append("hello "))

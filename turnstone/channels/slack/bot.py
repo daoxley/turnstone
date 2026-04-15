@@ -631,10 +631,7 @@ class TurnstoneSlackBot:
         event: ServerEvent,
     ) -> None:
         """Handle a typed server event for a subscribed workstream."""
-        if isinstance(event, ThinkingStartEvent):
-            pass
-
-        elif isinstance(event, ThinkingStopEvent):
+        if isinstance(event, (ThinkingStartEvent, ThinkingStopEvent)):
             pass
 
         elif isinstance(event, ContentEvent):
@@ -772,7 +769,7 @@ class TurnstoneSlackBot:
                         channel=pending_channel,
                         ts=pending_ts,
                         text=label,
-                        blocks=cast(list[dict[str, Any]], []),
+                        blocks=cast("list[dict[str, Any]]", []),
                     )
                 except Exception:
                     log.debug("slack.approval_resolved_edit_failed", ws_id=ws_id)
@@ -840,7 +837,7 @@ class TurnstoneSlackBot:
             channel=channel,
             thread_ts=thread_ts or None,
             text="Tool approval required",
-            blocks=cast(list[dict[str, Any]], blocks),
+            blocks=cast("list[dict[str, Any]]", blocks),
         )
         if resp.get("ok"):
             self._pending_approval_ts[ws_id] = (channel, resp["ts"])

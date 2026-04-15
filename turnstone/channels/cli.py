@@ -233,6 +233,7 @@ def main() -> None:
     if args.slack_token and not args.discord_token:
         import asyncio
         import contextlib
+
         from turnstone.channels.slack.bot import TurnstoneSlackBot
         from turnstone.channels.slack.config import SlackConfig
 
