@@ -74,6 +74,12 @@ def _sanitize_slack_preview(text: str, max_length: int = 1200) -> str:
         return text[: max_length - 3] + "..."
     return text
 
+def _parse_ts(ts: str) -> tuple[int, int]:
+    parts = ts.split(".", 1)
+    seconds = int(parts[0])
+    micros = int(parts[1]) if len(parts) > 1 else 0
+    return (seconds, micros)
+
 @dataclass(frozen=True)
 class PendingApproval:
     channel: str
@@ -267,7 +273,7 @@ class TurnstoneSlackBot:
                 key = (slack_route.channel, slack_route.user_id)
                 existing = latest_sessions.get(key)
 
-                if existing is None or float(slack_route.thread_ts) > float(existing[1]):
+                if existing is None or _parse_ts(slack_route.thread_ts) > _parse_ts(existing[1]):
                     latest_sessions[key] = (ws_id, slack_route.thread_ts)
 
             log.info("slack.route_recovered", ws_id=ws_id, channel_id=channel_id)
