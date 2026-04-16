@@ -222,6 +222,12 @@ def main() -> None:
         )
         sys.exit(1)
 
+    # Slack config validation (fail fast)
+    if bool(args.slack_token) != bool(args.slack_app_token):
+        raise SystemExit(
+            "--slack-token and --slack-app-token must be provided together"
+        )
+
     # -- Run -----------------------------------------------------------------
     import asyncio
     import contextlib

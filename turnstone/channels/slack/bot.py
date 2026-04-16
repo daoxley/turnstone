@@ -66,6 +66,13 @@ _GREETING = "Hey! Let me know what I can help with."
 _SSE_RECONNECT_DELAY: float = 2.0
 _SSE_MAX_RECONNECT_DELAY: float = 30.0
 
+def _sanitize_slack_preview(text: str, max_length: int = 1200) -> str:
+    """Escape Slack mrkdwn-sensitive content for safe fenced display."""
+    text = text.replace("`", "\\`")
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    if len(text) > max_length:
+        return text[: max_length - 3] + "..."
+    return text
 
 @dataclass(frozen=True)
 class PendingApproval:
@@ -1057,8 +1064,12 @@ class TurnstoneSlackBot:
     ) -> None:
         tool_lines = []
         for item in items:
-            name = item.get("approval_label") or item.get("func_name") or "tool"
-            preview = item.get("preview", "")
+            raw_name = item.get("approval_label") or item.get("func_name") or "tool"
+            name = raw_name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+            raw_preview = item.get("preview", "")
+            preview = _sanitize_slack_preview(raw_preview) if raw_preview else ""
+
             tool_lines.append(
                 f"• *{name}*\n```{preview}```" if preview else f"• *{name}*"
             )
