@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     from turnstone.channels._protocol import ChannelAdapter
     from turnstone.core.storage._protocol import StorageBackend
 
+from turnstone.channels.slack.routes import SlackRoute
+
 log = get_logger(__name__)
 
 _NOTIFY_ADAPTER_TIMEOUT: float = 30.0
@@ -112,9 +114,8 @@ async def _handle_notify(request: Request) -> JSONResponse:
         channel_id = target["channel_id"]
 
         if channel_type == "slack":
-            parts = channel_id.split(":", 2)
-            target_user_id = parts[1] if len(parts) >= 2 else ""
-            if ws_id and not target_user_id:
+            route = SlackRoute.parse(channel_id)
+            if ws_id and (not route.channel or not route.user_id):
                 return JSONResponse(
                     {
                         "error": (

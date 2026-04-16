@@ -5,9 +5,10 @@ or API Gateway is required. Mirrors the Discord adapter pattern.
 
 Interaction model
 -----------------
-* **Channels**: invoke with ``/turnstone``. The bot replies in a thread and
-  waits for messages there. Messages outside a bot-created thread are ignored.
-  Running ``/turnstone`` again in the same channel (by the same user)
+* **Channels**: invoke with the configured Slack slash command. The bot replies
+  in a thread and waits for messages there. Messages outside a bot-created
+  thread are ignored.
+* Running the slash command again in the same channel (by the same user)
   archives the old workstream and starts a fresh thread.
 * **DMs**: every message is routed freely, no slash command needed.
 
@@ -35,6 +36,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 from turnstone.channels._formatter import chunk_message
 from turnstone.channels._routing import ChannelRouter
 from turnstone.core.log import get_logger
+from turnstone.sdk._types import TurnstoneAPIError
 from turnstone.sdk.events import (
     ApprovalResolvedEvent,
     ApproveRequestEvent,
@@ -56,13 +58,14 @@ if TYPE_CHECKING:
     from turnstone.channels.slack.config import SlackConfig
     from turnstone.core.storage._protocol import StorageBackend
 
+from turnstone.channels.slack.routes import SlackRoute
+
 log = get_logger(__name__)
 
 _GREETING = "Hey! Let me know what I can help with."
 
 _SSE_RECONNECT_DELAY: float = 2.0
 _SSE_MAX_RECONNECT_DELAY: float = 30.0
-
 
 @dataclass
 class StreamingMessage:
@@ -184,10 +187,11 @@ class TurnstoneSlackBot:
 
         self._pending_approval_ts: dict[str, tuple[str, str]] = {}
         self._pending_plan_review_ts: dict[str, tuple[str, str]] = {}
-        self._notify_ws_map: dict[str, tuple[str, str, str]] = {}
-        # Temporary reply forwarding for notification conversations:
-        # maps ws_id -> canonical Slack route string
-        self._notify_reply_routes: dict[str, str] = {}
+        self._notify_ws_map: dict[str, tuple[str, SlackRoute]] = {}
+        # Per-workstream override used to route the next streamed assistant
+        # response back into a Slack notification reply thread instead of the
+        # default session thread.
+        self._notify_reply_routes: dict[str, SlackRoute] = {}
         self._channel_sessions: dict[tuple[str, str], tuple[str, str]] = {}
 
         headers: dict[str, str] = {}
@@ -244,13 +248,13 @@ class TurnstoneSlackBot:
 
             await self.subscribe_ws(ws_id, channel_id)
 
-            slack_channel, user_id, thread_ts = self._parse_route(channel_id)
-            if slack_channel and user_id and thread_ts:
-                key = (slack_channel, user_id)
+            slack_route = SlackRoute.parse(channel_id)
+            if slack_route.channel and slack_route.user_id and slack_route.thread_ts:
+                key = (slack_route.channel, slack_route.user_id)
                 existing = latest_sessions.get(key)
 
-                if existing is None or float(thread_ts) > float(existing[1]):
-                    latest_sessions[key] = (ws_id, thread_ts)
+                if existing is None or float(slack_route.thread_ts) > float(existing[1]):
+                    latest_sessions[key] = (ws_id, slack_route.thread_ts)
 
             log.info("slack.route_recovered", ws_id=ws_id, channel_id=channel_id)
 
@@ -306,14 +310,18 @@ class TurnstoneSlackBot:
             text=_GREETING,
         )
 
-        route_key = f"{slack_channel}:{user_id}:{opener_ts}"
+        route = SlackRoute(
+            channel=slack_channel,
+            user_id=user_id,
+            thread_ts=opener_ts,
+        )
 
         ws_id, _ = await self.router.get_or_create_workstream(
             channel_type="slack",
-            channel_id=route_key,
+            channel_id=route.to_channel_id(),
             name=f"slack-{slack_channel[:8]}",
         )
-        await self.subscribe_ws(ws_id, route_key)
+        await self.subscribe_ws(ws_id, route.to_channel_id())
         self._channel_sessions[(slack_channel, user_id)] = (ws_id, opener_ts)
 
         log.info(
@@ -341,20 +349,24 @@ class TurnstoneSlackBot:
         except Exception:
             log.debug("slack.archive_session.notify_failed", ws_id=ws_id)
 
-        route_key = f"{slack_channel}:{user_id}:{thread_ts}"
+        route = SlackRoute(
+            channel=slack_channel,
+            user_id=user_id,
+            thread_ts=thread_ts,
+        )
 
         try:
-            await self.router.delete_route("slack", route_key)
+            await self.router.delete_route("slack", route.to_channel_id())
             log.info(
                 "slack.archived_route_deleted",
                 ws_id=ws_id,
-                channel_id=route_key,
+                channel_id=route.to_channel_id(),
             )
         except Exception:
             log.exception(
                 "slack.archived_route_delete_failed",
                 ws_id=ws_id,
-                channel_id=route_key,
+                channel_id=route.to_channel_id(),
             )
 
         await self.unsubscribe_ws(ws_id)
@@ -381,17 +393,47 @@ class TurnstoneSlackBot:
             return
 
         if thread_ts and thread_ts in self._notify_ws_map:
-            origin_ws_id, notify_channel_id, target_user_id = self._notify_ws_map[thread_ts]
-            if channel_id == notify_channel_id and user_id == target_user_id:
+            origin_ws_id, notify_route = self._notify_ws_map[thread_ts]
+            if channel_id == notify_route.channel and user_id == (notify_route.user_id or ""):
                 try:
-                    reply_thread_ts = thread_ts or event.get("ts", "")
-                    self._notify_reply_routes[origin_ws_id] = self._format_route(
-                        channel_id,
-                        target_user_id,
-                        reply_thread_ts,
+                    reply_route = SlackRoute(
+                        channel=channel_id,
+                        user_id=user_id or None,
+                        thread_ts=thread_ts or event.get("ts") or None,
+                    )
+                    self._notify_reply_routes[origin_ws_id] = reply_route
+                    log.info(
+                        "slack.notification_reply_attempt",
+                        thread_ts=thread_ts,
+                        ws_id=origin_ws_id,
+                        channel=channel_id,
+                        user=user_id,
                     )
                     await self.router.send_message(origin_ws_id, text)
                     log.info("slack.notification_reply_routed", ws_id=origin_ws_id)
+                except TurnstoneAPIError as exc:
+                    self._notify_reply_routes.pop(origin_ws_id, None)
+                    if exc.status_code == 404:
+                        self._clear_notification_tracking_for_ws(origin_ws_id)
+                        log.warning(
+                            "slack.notification_reply_dead_ws",
+                            ws_id=origin_ws_id,
+                            thread_ts=thread_ts,
+                        )
+                        try:
+                            slash_cmd = self.config.slash_command or "/turnstone"
+                            await self._client.chat_postMessage(
+                                channel=channel_id,
+                                thread_ts=thread_ts or None,
+                                text=(
+                                    "This notification is no longer linked to an active session. "
+                                    f"Please start a new one with `{slash_cmd}`."
+                                ),
+                            )
+                        except Exception:
+                            log.debug("slack.notification_reply_dead_ws_notice_failed")
+                    else:
+                        log.exception("slack.notification_reply_failed")
                 except Exception:
                     self._notify_reply_routes.pop(origin_ws_id, None)
                     log.exception("slack.notification_reply_failed")
@@ -430,20 +472,20 @@ class TurnstoneSlackBot:
         text = event.get("text", "").strip()
         msg_ts = event.get("ts", "")
         thread_key = thread_ts or msg_ts
-        route_key = (
-            f"{channel_id}:{user_id}:{thread_key}"
-            if thread_key
-            else f"{channel_id}:{user_id}"
+        route = SlackRoute(
+            channel=channel_id,
+            user_id=user_id or None,
+            thread_ts=thread_key or None,
         )
 
         try:
             ws_id, is_new = await self.router.get_or_create_workstream(
                 channel_type="slack",
-                channel_id=route_key,
+                channel_id=route.to_channel_id(),
                 name=f"slack-dm-{user_id[:8]}",
             )
             if is_new:
-                await self.subscribe_ws(ws_id, route_key)
+                await self.subscribe_ws(ws_id, route.to_channel_id())
 
             await self.router.send_message(ws_id, text)
             log.info("slack.dm_dispatched", ws_id=ws_id, user=user_id)
@@ -498,10 +540,13 @@ class TurnstoneSlackBot:
     async def _on_plan_approve(self, ack: Any, body: dict[str, Any]) -> None:
         await ack()
         ws_id = body["actions"][0].get("value", "")
+        log.info("slack.plan_approve_clicked", ws_id=ws_id)
         if not ws_id:
             return
 
+        self._streaming.pop(ws_id, None)
         await self.router.send_plan_feedback(ws_id, "", "")
+        log.info("slack.plan_feedback_sent", ws_id=ws_id, feedback="")
 
         channel = body["container"]["channel_id"]
         ts = body["container"]["message_ts"]
@@ -571,7 +616,11 @@ class TurnstoneSlackBot:
         if not feedback:
             feedback = "Please revise the plan."
 
+        log.info("slack.plan_feedback_modal_submitted", ws_id=ws_id, feedback=feedback)
+
+        self._streaming.pop(ws_id, None)
         await self.router.send_plan_feedback(ws_id, "", feedback)
+        log.info("slack.plan_feedback_sent", ws_id=ws_id, feedback=feedback)
 
         entry = self._pending_plan_review_ts.pop(ws_id, None)
         if entry is not None:
@@ -609,11 +658,7 @@ class TurnstoneSlackBot:
         self._streaming.pop(ws_id, None)
         self._pending_approval_ts.pop(ws_id, None)
         self._pending_plan_review_ts.pop(ws_id, None)
-        self._notify_reply_routes.pop(ws_id, None)
-
-        stale = [ts for ts, entry in self._notify_ws_map.items() if entry[0] == ws_id]
-        for ts in stale:
-            del self._notify_ws_map[ts]
+        self._clear_notification_tracking_for_ws(ws_id)
 
         log.info("slack.unsubscribed", ws_id=ws_id)
 
@@ -669,15 +714,14 @@ class TurnstoneSlackBot:
 
                             event = ServerEvent.from_dict(data)
                             try:
-                                effective_route = self._notify_reply_routes.get(ws_id, channel_id)
-                                slack_channel, _target_user_id, thread_ts = self._parse_route(
-                                    effective_route
+                                effective_route = self._notify_reply_routes.get(
+                                    ws_id,
+                                    SlackRoute.parse(channel_id),
                                 )
-
                                 await self._on_ws_event(
                                     ws_id,
-                                    slack_channel,
-                                    thread_ts,
+                                    effective_route.channel,
+                                    effective_route.thread_ts or "",
                                     event,
                                 )
                             except Exception:
@@ -710,9 +754,9 @@ class TurnstoneSlackBot:
 
     async def _cleanup_stale_route(self, ws_id: str, channel_id: str) -> None:
         """Remove a channel route whose workstream no longer exists."""
-        slack_channel, user_id, thread_ts = self._parse_route(channel_id)
-        if slack_channel and user_id and thread_ts:
-            self._channel_sessions.pop((slack_channel, user_id), None)
+        route = SlackRoute.parse(channel_id)
+        if route.channel and route.user_id and route.thread_ts:
+            self._channel_sessions.pop((route.channel, route.user_id), None)
 
         await self.router.delete_route("slack", channel_id)
         self._subscribed_ws.discard(ws_id)
@@ -720,11 +764,7 @@ class TurnstoneSlackBot:
         self._streaming.pop(ws_id, None)
         self._pending_approval_ts.pop(ws_id, None)
         self._pending_plan_review_ts.pop(ws_id, None)
-        self._notify_reply_routes.pop(ws_id, None)
-
-        stale = [ts for ts, entry in self._notify_ws_map.items() if entry[0] == ws_id]
-        for ts in stale:
-            del self._notify_ws_map[ts]
+        self._clear_notification_tracking_for_ws(ws_id)
 
         log.info("slack.stale_route_removed", ws_id=ws_id)
 
@@ -921,14 +961,8 @@ class TurnstoneSlackBot:
 
             reply_route = self._notify_reply_routes.get(ws_id)
             if reply_route is not None and sm is not None and sm._ts:
-                reply_channel, target_user_id, _reply_thread_ts = self._parse_route(reply_route)
-                if reply_channel and target_user_id:
-                    self._track_notification(
-                        sm._ts,
-                        ws_id,
-                        reply_channel,
-                        target_user_id,
-                    )
+                if reply_route.channel and reply_route.user_id:
+                    self._track_notification(sm._ts, ws_id, reply_route)
 
             self._pending_approval_ts.pop(ws_id, None)
 
@@ -1010,47 +1044,32 @@ class TurnstoneSlackBot:
 
         return True
 
-    def _parse_route(self, channel_id: str) -> tuple[str, str, str]:
-        """Parse canonical Slack route as (channel, user_id, thread_ts)."""
-        parts = channel_id.split(":", 2)
-        slack_channel = parts[0]
-        user_id = parts[1] if len(parts) >= 2 else ""
-        thread_ts = parts[2] if len(parts) == 3 else ""
-        return slack_channel, user_id, thread_ts
-
-    def _format_route(
-        self,
-        slack_channel: str,
-        user_id: str = "",
-        thread_ts: str = "",
-    ) -> str:
-        """Format canonical Slack route as channel[:user_id[:thread_ts]]."""
-        if thread_ts:
-            return f"{slack_channel}:{user_id}:{thread_ts}"
-        if user_id:
-            return f"{slack_channel}:{user_id}"
-        return slack_channel
-
     def _track_notification(
         self,
         msg_ts: str,
         ws_id: str,
-        slack_channel: str,
-        target_user_id: str,
+        route: SlackRoute,
     ) -> None:
         while len(self._notify_ws_map) >= self._MAX_NOTIFY_TRACKING:
             del self._notify_ws_map[next(iter(self._notify_ws_map))]
-        self._notify_ws_map[msg_ts] = (ws_id, slack_channel, target_user_id)
+        self._notify_ws_map[msg_ts] = (ws_id, route)
+        log.info(
+            "slack.notification_tracked",
+            message_ts=msg_ts,
+            ws_id=ws_id,
+            channel=route.channel,
+            user=route.user_id,
+        )
 
     async def send(self, channel_id: str, content: str) -> str:
-        slack_channel, _user_id, thread_ts = self._parse_route(channel_id)
+        route = SlackRoute.parse(channel_id)
 
-        root_ts = thread_ts or ""
+        root_ts = route.thread_ts or ""
         first_post_ts = ""
 
         for i, chunk in enumerate(chunk_message(content, self.config.max_message_length)):
             resp = await self._client.chat_postMessage(
-                channel=slack_channel,
+                channel=route.channel,
                 thread_ts=root_ts or None,
                 text=chunk,
             )
@@ -1059,22 +1078,27 @@ class TurnstoneSlackBot:
                 if i == 0:
                     first_post_ts = ts
                     if not root_ts:
-                        # If we started a new thread, all later chunks should go under it
                         root_ts = ts
 
-        # If this was a new top-level notification, return the thread root ts
-        # If it was sent into an existing thread, return that existing thread ts
         return root_ts or first_post_ts
 
     async def send_notification(self, channel_id: str, content: str, ws_id: str) -> str:
+        route = SlackRoute.parse(channel_id)
         thread_root_ts = await self.send(channel_id, content)
-        if thread_root_ts and ws_id:
-            slack_channel, target_user_id, _thread_ts = self._parse_route(channel_id)
-            if slack_channel and target_user_id:
-                self._track_notification(
-                    thread_root_ts,
-                    ws_id,
-                    slack_channel,
-                    target_user_id,
-                )
+        if thread_root_ts and ws_id and route.channel and route.user_id:
+            self._track_notification(
+                thread_root_ts,
+                ws_id,
+                SlackRoute(
+                    channel=route.channel,
+                    user_id=route.user_id,
+                    thread_ts=thread_root_ts,
+                ),
+            )
         return thread_root_ts
+
+    def _clear_notification_tracking_for_ws(self, ws_id: str) -> None:
+        self._notify_reply_routes.pop(ws_id, None)
+        stale = [ts for ts, entry in self._notify_ws_map.items() if entry[0] == ws_id]
+        for ts in stale:
+            del self._notify_ws_map[ts]
