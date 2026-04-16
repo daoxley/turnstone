@@ -1045,34 +1045,36 @@ class TurnstoneSlackBot:
     async def send(self, channel_id: str, content: str) -> str:
         slack_channel, _user_id, thread_ts = self._parse_route(channel_id)
 
-        last_ts = ""
-        for chunk in chunk_message(content, self.config.max_message_length):
+        root_ts = thread_ts or ""
+        first_post_ts = ""
+
+        for i, chunk in enumerate(chunk_message(content, self.config.max_message_length)):
             resp = await self._client.chat_postMessage(
                 channel=slack_channel,
-                thread_ts=thread_ts or None,
+                thread_ts=root_ts or None,
                 text=chunk,
             )
             if resp.get("ok"):
-                last_ts = resp["ts"]
+                ts = resp["ts"]
+                if i == 0:
+                    first_post_ts = ts
+                    if not root_ts:
+                        # If we started a new thread, all later chunks should go under it
+                        root_ts = ts
 
-        return last_ts
+        # If this was a new top-level notification, return the thread root ts
+        # If it was sent into an existing thread, return that existing thread ts
+        return root_ts or first_post_ts
 
     async def send_notification(self, channel_id: str, content: str, ws_id: str) -> str:
-        msg_ts = await self.send(channel_id, content)
-        if msg_ts and ws_id:
+        thread_root_ts = await self.send(channel_id, content)
+        if thread_root_ts and ws_id:
             slack_channel, target_user_id, _thread_ts = self._parse_route(channel_id)
             if slack_channel and target_user_id:
                 self._track_notification(
-                    msg_ts,
+                    thread_root_ts,
                     ws_id,
                     slack_channel,
                     target_user_id,
                 )
-                log.debug(
-                    "slack.notification_tracked",
-                    message_ts=msg_ts,
-                    ws_id=ws_id,
-                    channel=slack_channel,
-                    user=target_user_id,
-                )
-        return msg_ts
+        return thread_root_ts
