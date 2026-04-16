@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     from turnstone.channels._protocol import ChannelAdapter
     from turnstone.core.storage._protocol import StorageBackend
 
+from turnstone.channels.slack.routes import SlackRoute
+
 log = get_logger(__name__)
 
 _NOTIFY_ADAPTER_TIMEOUT: float = 30.0
@@ -108,7 +110,24 @@ async def _handle_notify(request: Request) -> JSONResponse:
                 status_code=404,
             )
     elif "channel_type" in target and "channel_id" in target:
-        targets.append((target["channel_type"], target["channel_id"]))
+        channel_type = target["channel_type"]
+        channel_id = target["channel_id"]
+
+        if channel_type == "slack":
+            route = SlackRoute.parse(channel_id)
+            if ws_id and (not route.channel or not route.user_id):
+                return JSONResponse(
+                    {
+                        "error": (
+                            "slack notification targets with ws_id must use "
+                            "channel_id in the form 'channel:user_id' or "
+                            "'channel:user_id:thread_ts'"
+                        )
+                    },
+                    status_code=400,
+                )
+
+        targets.append((channel_type, channel_id))
     else:
         return JSONResponse(
             {"error": "target must have username or channel_type+channel_id"},

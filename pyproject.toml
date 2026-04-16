@@ -44,7 +44,7 @@ Repository = "https://github.com/turnstonelabs/turnstone"
 Issues = "https://github.com/turnstonelabs/turnstone/issues"
 
 [project.optional-dependencies]
-test = ["pytest>=9.0", "pytest-cov>=6.0", "croniter>=3.0"]
+test = ["pytest>=9.0", "pytest-cov>=6.0", "croniter>=3.0", "slack-bolt>=1.18", "aiohttp>=3.9"]
 dev = ["ruff>=0.9", "mypy>=1.14"]
 console = ["croniter>=3.0"]
 anthropic = ["anthropic>=0.39"]
@@ -53,7 +53,8 @@ ddg = ["ddgs>=9.0"]
 discord = ["discord.py>=2.4"]
 tls = ["lacme>=1.0.5"]
 sandbox = ["sympy>=1.13", "numpy>=2.0", "scipy>=1.14", "pytest>=9.0"]
-all = ["turnstone[console,anthropic,postgres,discord,ddg,tls,sandbox]"]
+slack = ["slack-bolt>=1.18", "aiohttp>=3.9"]
+all = ["turnstone[console,anthropic,postgres,discord,ddg,tls,sandbox,slack]"]
 
 [project.scripts]
 turnstone = "turnstone.cli:main"
@@ -183,3 +184,8 @@ warn_unused_ignores = false
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = ["slack_bolt", "slack_bolt.*", "slack_sdk", "slack_sdk.*"]
+ignore_missing_imports = true
+disallow_untyped_calls = false
