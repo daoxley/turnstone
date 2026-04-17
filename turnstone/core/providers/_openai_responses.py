@@ -161,6 +161,12 @@ class OpenAIResponsesProvider:
                 if isinstance(content, list):
                     # Structured content (e.g. vision) — serialize to string
                     output = json.dumps(content)
+                log.info(
+                    "tool_output_raw",
+                    call_id=msg.get("tool_call_id", ""),
+                    output_len=len(output or ""),
+                    output_preview=(output or "")[:200],
+                )
                 items.append(
                     {
                         "type": "function_call_output",
