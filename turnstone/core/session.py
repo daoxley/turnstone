@@ -389,6 +389,7 @@ class ChatSession:
         self._memory_config = memory_config or MemoryConfig()
         self._ws_id = ws_id or uuid.uuid4().hex
         self._title_generated = False
+        self._enable_title_generation = False
         self._read_files: set[str] = set()
         self.messages: list[dict[str, Any]] = []
         self._last_usage: dict[str, int] | None = None
@@ -1170,6 +1171,13 @@ class ChatSession:
 
             # Use slightly higher temperature for refreshes to encourage variety
             temp = 0.7 if current_title else 0.3
+
+            if not self._enable_title_generation:
+                log.info("ws.title.skip", ws_id=ws_id[:8], reason="disabled")
+                if current_title and self._ws_id == ws_id:
+                    self.ui.on_rename(current_title)
+                return
+
 
             result = self._utility_completion(
                 [

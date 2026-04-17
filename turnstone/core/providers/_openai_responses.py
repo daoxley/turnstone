@@ -444,13 +444,13 @@ class OpenAIResponsesProvider:
                 error_msg = getattr(error, "message", "Unknown error") if error else "Unknown error"
                 raise RuntimeError(f"Responses API error: {error_msg}")
 
-        log.debug(
-            "openai.responses.response",
+        log.info(
+            "openai.responses.request",
+            model=model,
             stream=True,
-            finish_reason=last_finish,
-            content_length=content_len,
-            tool_call_count=tool_call_count,
-            completion_tokens=completion_tokens,
+            max_tokens=max_tokens,
+            input_items=len(kwargs.get("input", [])),
+            tool_count=len(kwargs.get("tools", [])),
         )
 
         # Emit accumulated citations as a final info chunk
@@ -553,7 +553,7 @@ class OpenAIResponsesProvider:
             usage=usage,
             provider_blocks=provider_blocks,
         )
-        log.debug(
+        log.info(
             "openai.responses.response",
             stream=False,
             finish_reason=finish_reason,
