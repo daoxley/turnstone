@@ -309,12 +309,14 @@ class OpenAIResponsesProvider:
         kwargs["stream"] = True
 
         log.info(
-            "openai.responses.request",
-            model=model,
+            "openai.responses.response",
             stream=True,
-            max_tokens=max_tokens,
-            input_items=len(kwargs.get("input", [])),
-            tool_count=len(kwargs.get("tools", [])),
+            finish_reason=last_finish,
+            content_length=content_len,
+            tool_call_count=tool_call_count,
+            prompt_tokens=usage.prompt_tokens if usage else None,
+            completion_tokens=completion_tokens,
+            total_tokens=usage.total_tokens if usage else None,
         )
 
         stream = client.responses.create(**kwargs)
@@ -550,7 +552,9 @@ class OpenAIResponsesProvider:
             finish_reason=finish_reason,
             content_length=len(content),
             tool_call_count=len(tool_calls),
+            prompt_tokens=usage.prompt_tokens if usage else None,
             completion_tokens=usage.completion_tokens if usage else None,
+            total_tokens=usage.total_tokens if usage else None,
         )
         return result
 
