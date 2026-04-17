@@ -183,7 +183,7 @@ class OpenAIResponsesProvider:
     def _trim_items(
         items: list[dict[str, Any]],
         verbatim_recent: int = 3,
-        tool_output_char_limit: int = 2000,
+        tool_output_char_limit: int = 6500,
     ) -> list[dict[str, Any]]:
         """Trim old tool outputs to prevent token explosion across long threads.
 
@@ -193,6 +193,10 @@ class OpenAIResponsesProvider:
         Everything else (user messages, assistant text, function_calls) is
         always kept verbatim.
         """
+        # Don't trim short conversations — only activate once history
+        # has accumulated enough to be worth trimming
+        if len(items) <= 12:
+            return items
         # Find indices of all function_call items (marks assistant turn boundary)
         assistant_turn_indices = [
             i for i, item in enumerate(items)
