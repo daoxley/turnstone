@@ -309,14 +309,12 @@ class OpenAIResponsesProvider:
         kwargs["stream"] = True
 
         log.info(
-            "openai.responses.response",
+            "openai.responses.request",
+            model=model,
             stream=True,
-            finish_reason=last_finish,
-            content_length=content_len,
-            tool_call_count=tool_call_count,
-            prompt_tokens=usage.prompt_tokens if usage else None,
-            completion_tokens=completion_tokens,
-            total_tokens=usage.total_tokens if usage else None,
+            max_tokens=max_tokens,
+            input_items=len(kwargs.get("input", [])),
+            tool_count=len(kwargs.get("tools", [])),
         )
 
         stream = client.responses.create(**kwargs)
@@ -331,6 +329,7 @@ class OpenAIResponsesProvider:
         tool_call_count = 0
         last_finish: str | None = None
         completion_tokens: int | None = None
+        usage = None
         # Track tool call indices by call_id for consistent ToolCallDelta.index
         tool_call_indices: dict[str, int] = {}
         # Collect output items for provider_blocks
@@ -445,6 +444,17 @@ class OpenAIResponsesProvider:
                 error = getattr(response, "error", None) if response else None
                 error_msg = getattr(error, "message", "Unknown error") if error else "Unknown error"
                 raise RuntimeError(f"Responses API error: {error_msg}")
+
+        log.info(
+            "openai.responses.response",
+            stream=True,
+            finish_reason=last_finish,
+            content_length=content_len,
+            tool_call_count=tool_call_count,
+            prompt_tokens=usage.prompt_tokens if usage else None,
+            completion_tokens=completion_tokens,
+            total_tokens=usage.total_tokens if usage else None,
+        )
 
         # Emit accumulated citations as a final info chunk
         if annotations:
