@@ -1129,6 +1129,13 @@ class ChatSession:
         asks the LLM to produce a **different** title.
         """
         ws_id = self._ws_id  # Capture before async work
+
+        if not self._enable_title_generation:
+            log.info("ws.title.skip", ws_id=ws_id[:8], reason="disabled")
+            if current_title and self._ws_id == ws_id:
+                self.ui.on_rename(current_title)
+            return
+
         log.info("ws.title.gen_start", ws_id=ws_id[:8])
         try:
             # Gather first user message and first assistant reply
@@ -1171,13 +1178,6 @@ class ChatSession:
 
             # Use slightly higher temperature for refreshes to encourage variety
             temp = 0.7 if current_title else 0.3
-
-            if not self._enable_title_generation:
-                log.info("ws.title.skip", ws_id=ws_id[:8], reason="disabled")
-                if current_title and self._ws_id == ws_id:
-                    self.ui.on_rename(current_title)
-                return
-
 
             result = self._utility_completion(
                 [
