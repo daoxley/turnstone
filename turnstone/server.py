@@ -2334,6 +2334,19 @@ async def create_workstream(request: Request) -> JSONResponse:
             {"error": "attachments cannot be combined with resume_ws"},
             status_code=400,
         )
+    # Kind + parent relationship: coordinator-spawned children forward
+    # these from the console's CoordinatorClient.  Default kind is
+    # "interactive"; coordinators themselves are created by the console's
+    # own CoordinatorManager and never land in this handler.  Only
+    # ``"interactive"`` is accepted here — requests that try to create a
+    # coordinator via the generic workstream endpoint are rejected.
+    body_kind = body.get("kind", "interactive") or "interactive"
+    if body_kind != "interactive":
+        return JSONResponse(
+            {"error": "coordinator workstreams must be created via /v1/api/coordinator/new"},
+            status_code=400,
+        )
+    body_parent = body.get("parent_ws_id") or None
     try:
         ws = mgr.create(
             name=body.get("name", ""),
@@ -2345,6 +2358,9 @@ async def create_workstream(request: Request) -> JSONResponse:
             ws_id=requested_ws_id,
             client_type=body.get("client_type", "") or "",
             judge_model=body.get("judge_model", "") or None,
+            user_id=uid,
+            kind=body_kind,
+            parent_ws_id=body_parent,
         )
         if not isinstance(ws.ui, WebUI):
             raise TypeError(f"Expected WebUI, got {type(ws.ui).__name__}")
@@ -3055,18 +3071,35 @@ async def open_workstream(request: Request) -> JSONResponse:
         )
 
     _st = _get_storage()
-    ws_row = _st.get_workstream_metadata(resolved_id)
+    ws_row = _st.get_workstream(resolved_id)
     if not ws_row:
         return JSONResponse({"error": "Workstream not found in storage"}, status_code=404)
+
+    # Coordinator workstreams live on the console process, not on server
+    # nodes.  Refuse to rehydrate one here so we don't silently build a
+    # coordinator-kind ChatSession with coord_client=None (A/S1 guard).
+    if ws_row.get("kind") != "interactive":
+        return JSONResponse(
+            {"error": "Workstream is not an interactive kind"},
+            status_code=400,
+        )
 
     auth = getattr(getattr(request, "state", None), "auth_result", None)
     uid: str = getattr(auth, "user_id", "") or ""
 
     try:
+        # Prefer the persisted owner (this workstream may have been created
+        # by a trusted-service forwarder) and only fall back to the
+        # authenticated caller if the stored row has no owner recorded.
+        stored_owner = (ws_row.get("user_id") or "").strip()
+        owner_uid = stored_owner or uid
         ws = mgr.create(
             name=ws_row.get("name", ""),
-            ui_factory=lambda wid: WebUI(ws_id=wid, user_id=uid),
+            ui_factory=lambda wid: WebUI(ws_id=wid, user_id=owner_uid),
             ws_id=resolved_id,
+            user_id=owner_uid,
+            kind=ws_row.get("kind") or "interactive",
+            parent_ws_id=ws_row.get("parent_ws_id"),
         )
     except Exception as e:
         log.warning("ws.open.create_failed", ws_id=resolved_id[:8], error=str(e))
@@ -4574,6 +4607,8 @@ def main() -> None:
         skill: str | None = None,
         client_type: str = "",
         judge_model: str | None = None,
+        kind: str = "interactive",
+        parent_ws_id: str | None = None,
     ) -> ChatSession:
         assert ui is not None
         # Resolve the effective alias once and use it consistently
@@ -4664,6 +4699,8 @@ def main() -> None:
             if client_type in {ct.value for ct in ClientType}
             else ClientType.WEB,
             username=_username,
+            kind=kind,
+            parent_ws_id=parent_ws_id,
         )
 
     # Create WatchRunner (periodic command polling, server-level)
