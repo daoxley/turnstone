@@ -390,6 +390,7 @@ class ChatSession:
         self._ws_id = ws_id or uuid.uuid4().hex
         self._title_generated = False
         self._enable_title_generation = False
+        self._include_default_tools = False
         self._read_files: set[str] = set()
         self.messages: list[dict[str, Any]] = []
         self._last_usage: dict[str, int] | None = None
@@ -467,9 +468,14 @@ class ChatSession:
             self._agent_tools = []
         elif mcp_client:
             mcp_tools = mcp_client.get_tools()
-            self._tools = merge_mcp_tools(INTERACTIVE_TOOLS, mcp_tools)
-            self._task_tools = merge_mcp_tools(TASK_AGENT_TOOLS, mcp_tools)
-            self._agent_tools = merge_mcp_tools(AGENT_TOOLS, mcp_tools)
+            if self._include_default_tools:
+                self._tools = merge_mcp_tools(INTERACTIVE_TOOLS, mcp_tools)
+                self._task_tools = merge_mcp_tools(TASK_AGENT_TOOLS, mcp_tools)
+                self._agent_tools = merge_mcp_tools(AGENT_TOOLS, mcp_tools)
+            else:
+                self._tools = list(mcp_tools)
+                self._task_tools = list(mcp_tools)
+                self._agent_tools = list(mcp_tools)
             # Register for tool-change notifications from MCP servers
             self._mcp_refresh_cb = self._on_mcp_tools_changed
             mcp_client.add_listener(self._mcp_refresh_cb)
@@ -480,9 +486,14 @@ class ChatSession:
             self._mcp_prompt_cb = self._on_mcp_prompts_changed
             mcp_client.add_prompt_listener(self._mcp_prompt_cb)
         else:
-            self._tools = INTERACTIVE_TOOLS
-            self._task_tools = TASK_AGENT_TOOLS
-            self._agent_tools = AGENT_TOOLS
+            if self._include_default_tools:
+                self._tools = INTERACTIVE_TOOLS
+                self._task_tools = TASK_AGENT_TOOLS
+                self._agent_tools = AGENT_TOOLS
+            else:
+                self._tools = []
+                self._task_tools = []
+                self._agent_tools = []
         # Inject the live alias list into plan_agent / task_agent tool
         # descriptions so the calling LLM sees its `model` parameter options.
         # Replaces affected tool dicts with deep copies — module-level
@@ -821,9 +832,14 @@ class ChatSession:
         if self._kind == "coordinator":
             return
         mcp_tools = self._mcp_client.get_tools()
-        self._tools = merge_mcp_tools(INTERACTIVE_TOOLS, mcp_tools)
-        self._task_tools = merge_mcp_tools(TASK_AGENT_TOOLS, mcp_tools)
-        self._agent_tools = merge_mcp_tools(AGENT_TOOLS, mcp_tools)
+        if self._include_default_tools:
+            self._tools = merge_mcp_tools(INTERACTIVE_TOOLS, mcp_tools)
+            self._task_tools = merge_mcp_tools(TASK_AGENT_TOOLS, mcp_tools)
+            self._agent_tools = merge_mcp_tools(AGENT_TOOLS, mcp_tools)
+        else:
+            self._tools = list(mcp_tools)
+            self._task_tools = list(mcp_tools)
+            self._agent_tools = list(mcp_tools)
         self._render_agent_tool_descriptions()
         self._rebuild_tool_search()
 
