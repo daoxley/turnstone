@@ -308,7 +308,7 @@ class OpenAIResponsesProvider:
         )
         kwargs["stream"] = True
 
-        log.debug(
+        log.info(
             "openai.responses.request",
             model=model,
             stream=True,
@@ -444,15 +444,6 @@ class OpenAIResponsesProvider:
                 error_msg = getattr(error, "message", "Unknown error") if error else "Unknown error"
                 raise RuntimeError(f"Responses API error: {error_msg}")
 
-        log.info(
-            "openai.responses.request",
-            model=model,
-            stream=True,
-            max_tokens=max_tokens,
-            input_items=len(kwargs.get("input", [])),
-            tool_count=len(kwargs.get("tools", [])),
-        )
-
         # Emit accumulated citations as a final info chunk
         if annotations:
             citation_text = format_citations("", annotations).strip()
@@ -488,7 +479,7 @@ class OpenAIResponsesProvider:
             capabilities=capabilities,
         )
 
-        log.debug(
+        log.info(
             "openai.responses.request",
             model=model,
             stream=False,
