@@ -176,8 +176,8 @@ class OpenAIResponsesProvider:
     @staticmethod
     def _trim_items(
         items: list[dict[str, Any]],
-        verbatim_recent: int = 1,
-        tool_output_char_limit: int = 400,
+        verbatim_recent: int = 3,
+        tool_output_char_limit: int = 2000,
     ) -> list[dict[str, Any]]:
         """Trim old tool outputs to prevent token explosion across long threads.
 
