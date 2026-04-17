@@ -170,7 +170,50 @@ class OpenAIResponsesProvider:
                 )
 
         instructions = "\n\n".join(instructions_parts) if instructions_parts else None
+        items = OpenAIResponsesProvider._trim_items(items)
         return instructions, items
+
+    @staticmethod
+    def _trim_items(
+        items: list[dict[str, Any]],
+        verbatim_recent: int = 1,
+        tool_output_char_limit: int = 400,
+    ) -> list[dict[str, Any]]:
+        """Trim old tool outputs to prevent token explosion across long threads.
+
+        Keeps the most recent ``verbatim_recent`` assistant turns worth of
+        tool outputs intact (capped at ``tool_output_char_limit`` chars).
+        Older function_call_output items are replaced with a short stub.
+        Everything else (user messages, assistant text, function_calls) is
+        always kept verbatim.
+        """
+        # Find indices of all function_call items (marks assistant turn boundary)
+        assistant_turn_indices = [
+            i for i, item in enumerate(items)
+            if item.get("type") == "function_call"
+        ]
+        cutoff = (
+            assistant_turn_indices[-verbatim_recent]
+            if len(assistant_turn_indices) >= verbatim_recent
+            else 0
+        )
+        trimmed = []
+        for i, item in enumerate(items):
+            if item.get("type") == "function_call_output":
+                if i >= cutoff:
+                    output = item.get("output", "")
+                    if isinstance(output, str) and len(output) > tool_output_char_limit:
+                        item = {
+                            **item,
+                            "output": output[:tool_output_char_limit] + " …[truncated]",
+                        }
+                else:
+                    item = {
+                        **item,
+                        "output": "[tool output omitted from context]",
+                    }
+            trimmed.append(item)
+        return trimmed
 
     # -- tool conversion -----------------------------------------------------
 
