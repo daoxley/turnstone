@@ -24,8 +24,12 @@
 
   const wsId = document.documentElement.dataset.wsId || "";
   if (!wsId) {
-    document.getElementById("coord-messages").innerHTML =
-      '<div class="ts-msg ts-msg--error">Missing ws_id on &lt;html&gt; tag.</div>';
+    // Static literal — class-name migration only; no XSS surface.
+    const missing = document.createElement("div");
+    missing.className = "msg error";
+    missing.textContent = "Missing ws_id on <html> tag.";
+    const host = document.getElementById("coord-messages");
+    if (host) host.replaceChildren(missing);
     return;
   }
 
@@ -64,6 +68,20 @@
   let evtSource = null;
   let reconnectAttempts = 0;
   let reconnectTimer = null;
+
+  // Cache of judge verdicts keyed by call_id.  Judge events (intent_verdict)
+  // and approval events (approve_request) are async and can arrive in either
+  // order; the cache lets each handler apply data to the other without
+  // assuming ordering.
+  const judgeVerdicts = new Map();
+
+  // Approval focus is deferred until the judge returns a verdict so the
+  // Approve button doesn't pre-emptively light up (could read as "already
+  // approved").  No fallback — if the judge never responds (disabled /
+  // slow), focus simply never moves; keyboard users tab from the
+  // composer to reach the buttons manually.  A fallback would produce
+  // an ambiguous focus ring that could be misread as "judge approved."
+  let approvalFocusClaimed = false;
 
   // ------------------------------------------------------------------
   // HTML escaping and safe ws_id linkification
@@ -139,23 +157,25 @@
   // Message append helpers
   // ------------------------------------------------------------------
 
-  // Map raw role → ts-msg modifier.  "error" overloads the role slot
-  // for styling; opts.label still carries the tool name so SR text
-  // like "error · bash" stays meaningful on the data-ts-role /
-  // aria-label attributes when labels stop rendering as DOM text.
-  const _TS_ROLE_VARIANTS = {
-    user: "ts-msg--user",
-    assistant: "ts-msg--assistant",
-    reasoning: "ts-msg--reasoning",
-    tool: "ts-msg--tool",
-    error: "ts-msg--error",
+  // Map raw role → .msg variant (DS primitives/message.css).  "error"
+  // overloads the role slot for styling; opts.label still carries the
+  // tool name so SR text like "error · bash" stays meaningful on the
+  // data-ts-role / aria-label attributes when labels stop rendering
+  // as DOM text.
+  const _MSG_VARIANTS = {
+    user: "user",
+    assistant: "assistant",
+    reasoning: "reasoning",
+    tool: "tool",
+    error: "error",
+    info: "info",
   };
 
   function appendMsg(role, html, opts) {
     opts = opts || {};
     const el = document.createElement("div");
-    const variant = _TS_ROLE_VARIANTS[role] || "ts-msg--assistant";
-    el.className = "ts-msg " + variant;
+    const variant = _MSG_VARIANTS[role] || "assistant";
+    el.className = "msg " + variant;
     // role="article" makes aria-label reliably announced by screen
     // readers — a generic <div> with no implicit role doesn't expose
     // aria-label on its own.  "article" fits: each message is a
@@ -171,7 +191,7 @@
       el.setAttribute("aria-label", opts.label);
     }
     const body = document.createElement("div");
-    body.className = "ts-msg-body";
+    body.className = "msg-body";
     body.innerHTML = html;
     el.appendChild(body);
     messagesEl.appendChild(el);
@@ -225,7 +245,7 @@
     // token so the user sees live-formatted markdown instead of a final
     // "pop" on stream_end.  Heavy post-processing (syntax highlighting,
     // mermaid, KaTeX) stays deferred to streamingRenderFinalize below.
-    const body = currentAssistantEl.querySelector(".ts-msg-body");
+    const body = currentAssistantEl.querySelector(".msg-body");
     if (body && typeof streamingRender === "function") {
       try {
         streamingRender(body, currentAssistantBuf);
@@ -251,7 +271,7 @@
       messagesEl.setAttribute("aria-live", "off");
     }
     currentReasoningBuf += text;
-    const body = currentReasoningEl.querySelector(".ts-msg-body");
+    const body = currentReasoningEl.querySelector(".msg-body");
     if (body) body.textContent = currentReasoningBuf;
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
@@ -263,7 +283,7 @@
     // the innerHTML assignment inside the helper is XSS-safe as long as
     // renderer.js is trusted — same contract as ui/static/app.js.
     if (currentAssistantEl && currentAssistantBuf) {
-      const body = currentAssistantEl.querySelector(".ts-msg-body");
+      const body = currentAssistantEl.querySelector(".msg-body");
       if (body && typeof streamingRenderFinalize === "function") {
         try {
           streamingRenderFinalize(body, currentAssistantBuf);
@@ -286,46 +306,178 @@
   function showApproval(items) {
     approvalTools.replaceChildren();
     const pending = (items || []).filter((it) => it.needs_approval);
-    // Header row — "Approve N tool calls" clarifies that the batch
-    // approval applies to every row, not just the focused one.
-    if (pending.length > 0) {
-      const header = document.createElement("div");
-      header.className = "ts-approval-header";
-      header.textContent =
-        pending.length === 1
-          ? "Approve 1 tool call:"
-          : "Approve " + pending.length + " tool calls (batch):";
-      approvalTools.appendChild(header);
+    // Count badge — shown in the .dhead row's trailing .dcount slot.
+    // The "Approval required" kicker is static in the HTML so the
+    // screen-reader label stays stable across open/close cycles.
+    const countEl = document.getElementById("coord-approval-count");
+    if (countEl) {
+      countEl.textContent = pending.length ? pending.length + " pending" : "";
     }
     let firstCallId = null;
     pending.forEach((it, idx) => {
       if (!firstCallId) firstCallId = it.call_id;
+      // Each pending tool call renders as a .dcall row — the DS pattern
+      // frames this like a mini inspectable call line.  If we've already
+      // received a judge verdict for this call_id, its risk_level takes
+      // precedence; otherwise default to "low" until a verdict arrives.
       const row = document.createElement("div");
-      row.className = "ts-approval-tool";
-      const label =
-        it.header || it.approval_label || it.func_name || "(unknown tool)";
-      row.textContent = pending.length > 1 ? idx + 1 + ". " + label : label;
+      row.className = "dcall";
+      if (it.call_id) row.dataset.callId = it.call_id;
+      if (pending.length > 1) {
+        const idx_ = document.createElement("span");
+        idx_.className = "risk low";
+        idx_.textContent = idx + 1 + "/" + pending.length;
+        row.appendChild(idx_);
+      }
+      const fn = document.createElement("span");
+      fn.className = "dfn";
+      fn.textContent = it.func_name || "(unknown tool)";
+      row.appendChild(fn);
+      const args = document.createElement("span");
+      args.className = "dargs";
+      const preview = it.header || it.approval_label || it.preview || "";
+      args.textContent = preview;
+      row.appendChild(args);
       approvalTools.appendChild(row);
+      // If the judge already delivered a verdict for this call before the
+      // approval surfaced, render it into the dock immediately.  Otherwise
+      // render a spinner placeholder so the reviewer sees "the judge is
+      // still thinking" instead of silence.
+      if (it.call_id && judgeVerdicts.has(it.call_id)) {
+        applyJudgeVerdictToRow(row, judgeVerdicts.get(it.call_id));
+      } else {
+        applyJudgePendingToRow(row);
+      }
     });
     pendingApprovalCallId = firstCallId;
-    approvalBar.classList.add("visible");
-    // Move focus to the approve button — non-modal region, so keyboard
-    // users don't have to Shift+Tab back from the composer.  One-time
-    // focus shift; subsequent Tab/Shift+Tab navigates normally.
-    const approveBtn = document.getElementById("coord-approve-btn");
-    if (approveBtn) {
+    approvalBar.hidden = false;
+    // Defer focus until the judge returns a verdict.  If the verdict is
+    // already cached (rare race), claim focus immediately.  Otherwise
+    // wait for intent_verdict — no fallback.
+    approvalFocusClaimed = false;
+    if (firstCallId && judgeVerdicts.has(firstCallId)) {
+      claimApprovalFocusForVerdict(judgeVerdicts.get(firstCallId));
+    }
+  }
+
+  // Claim approval-bar focus for a specific button.  Idempotent — further
+  // calls after the first are noops so we don't bounce focus across
+  // multiple buttons as verdicts arrive for a batch.
+  function claimApprovalFocus(btnId) {
+    if (approvalFocusClaimed) return;
+    approvalFocusClaimed = true;
+    const btn = document.getElementById(btnId);
+    if (btn) {
       try {
-        approveBtn.focus({ preventScroll: false });
+        btn.focus({ preventScroll: false });
       } catch (_) {
         /* noop */
       }
     }
   }
 
+  // Focus the appropriate action based on the judge's recommendation:
+  // deny → Deny button (judge is warning; reviewer should default to
+  // blocking), approve/review/other → Approve button.
+  function claimApprovalFocusForVerdict(verdict) {
+    const rec = (verdict && verdict.recommendation) || "";
+    claimApprovalFocus(rec === "deny" ? "coord-deny-btn" : "coord-approve-btn");
+  }
+
+  // Ensure a .dctx sibling exists for the given .dcall row, tagged with
+  // the row's call_id.  Returns the .dctx element ready to be populated.
+  function ensureDctxAfterRow(row) {
+    if (!row) return null;
+    const callId = row.dataset.callId;
+    let dctx = row.nextElementSibling;
+    if (
+      !dctx ||
+      !dctx.classList.contains("dctx") ||
+      dctx.dataset.forCall !== callId
+    ) {
+      dctx = document.createElement("div");
+      dctx.className = "dctx";
+      if (callId) dctx.dataset.forCall = callId;
+      row.insertAdjacentElement("afterend", dctx);
+    }
+    return dctx;
+  }
+
+  // Remove any existing .drationale sibling for the given call_id so
+  // repeated verdicts don't stack.
+  function removeRationale(callId) {
+    if (!callId) return;
+    const existing = approvalTools.querySelector(
+      '.drationale[data-for-call="' + cssEscape(callId) + '"]',
+    );
+    if (existing) existing.remove();
+  }
+
+  // Render a "judge evaluating…" placeholder into the .dctx so the
+  // reviewer sees the judge is still thinking while awaiting verdict.
+  function applyJudgePendingToRow(row) {
+    const dctx = ensureDctxAfterRow(row);
+    if (!dctx) return;
+    removeRationale(row.dataset.callId);
+    dctx.replaceChildren();
+    const chip = document.createElement("code");
+    chip.className = "judging";
+    const spin = document.createElement("span");
+    spin.className = "spin";
+    spin.setAttribute("aria-hidden", "true");
+    chip.appendChild(spin);
+    chip.appendChild(document.createTextNode("judge evaluating…"));
+    dctx.appendChild(chip);
+  }
+
+  // Render a judge verdict into a specific .dcall row.  Builds:
+  //   .dctx    <code>judge: rec (risk: lvl)</code> + optional confidence
+  //   .drationale  judge.reasoning text (wrapped prose block)
+  // The judge chip colour-codes by recommendation: approve=ok/green,
+  // review=warn/amber, deny=err/red — so reviewers can triage at a
+  // glance without reading.  Repeated calls for the same row (e.g.
+  // re-evaluation) replace prior content.
+  function applyJudgeVerdictToRow(row, verdict) {
+    if (!row || !verdict) return;
+    const callId = row.dataset.callId;
+    const dctx = ensureDctxAfterRow(row);
+    removeRationale(callId);
+    dctx.replaceChildren();
+    const chip = document.createElement("code");
+    const rec = verdict.recommendation || "?";
+    const risk = verdict.risk_level || "?";
+    chip.textContent = "judge: " + rec + " (risk: " + risk + ")";
+    if (rec === "approve") chip.classList.add("rec-approve");
+    else if (rec === "review") chip.classList.add("rec-review");
+    else if (rec === "deny") chip.classList.add("rec-deny");
+    dctx.appendChild(chip);
+    if (verdict.confidence != null) {
+      const conf = document.createElement("code");
+      conf.textContent = "confidence: " + verdict.confidence;
+      dctx.appendChild(conf);
+    }
+    if (verdict.reasoning) {
+      const rationale = document.createElement("div");
+      rationale.className = "drationale";
+      if (callId) rationale.dataset.forCall = callId;
+      rationale.textContent = verdict.reasoning;
+      dctx.insertAdjacentElement("afterend", rationale);
+    }
+  }
+
   function hideApproval() {
-    approvalBar.classList.remove("visible");
+    approvalBar.hidden = true;
     approvalTools.replaceChildren();
+    const countEl = document.getElementById("coord-approval-count");
+    if (countEl) countEl.textContent = "";
     pendingApprovalCallId = null;
+    approvalFocusClaimed = false;
+    // Prune the verdict cache — verdicts are only used while the dock
+    // is visible, so keeping them across resolve cycles would leak
+    // memory over long sessions.
+    if (judgeVerdicts && typeof judgeVerdicts.clear === "function") {
+      judgeVerdicts.clear();
+    }
     setApprovalButtonsDisabled(false);
     // Return focus to the composer for keyboard users.  Only if the
     // approval bar itself was the focus holder — don't steal focus from
@@ -465,12 +617,18 @@
     // alone (WCAG 1.4.1).  ● connected, ○ connecting, ⚠ disconnected.
     const glyph = cls === "ok" ? "● " : cls === "err" ? "⚠ " : "○ ";
     sseEl.textContent = glyph + text;
-    // Preserve the base .ts-header-status class + add the BEM modifier
-    // variant so chat.css's .ts-header-status--ok / --err colour rules
-    // actually win; setting className to just "ok"/"err" drops the
-    // base class and the green / red colour never applies.
-    var base = "ts-header-status";
-    sseEl.className = cls ? base + " " + base + "--" + cls : base;
+    // Keep .appbar-status (DS: mono 11px --ink-3) as the base; layer the
+    // semantic colour via a data-state attribute so the glyph-prefixed
+    // label remains high-contrast while the text colour tracks OK / ERR.
+    sseEl.className = "appbar-status";
+    sseEl.dataset.state = cls || "";
+    if (cls === "ok") {
+      sseEl.style.color = "var(--ok)";
+    } else if (cls === "err") {
+      sseEl.style.color = "var(--err)";
+    } else {
+      sseEl.style.color = "";
+    }
   }
 
   function connectSSE() {
@@ -600,7 +758,7 @@
           if (
             it.call_id &&
             document.querySelector(
-              '.ts-msg[data-call-id="' + cssEscape(it.call_id) + '"]',
+              '.msg[data-call-id="' + cssEscape(it.call_id) + '"]',
             )
           ) {
             return; // already rendered in this pane — skip
@@ -612,7 +770,35 @@
         hideApproval();
         break;
       case "intent_verdict":
-        // Minimal surfacing — risk_level + recommendation.
+        // Prefer rendering the verdict inside the approval dock — the
+        // judge always evaluates a specific call_id, and the verdict is
+        // decision context for that pending approval, not a chat
+        // message.  Cache the verdict so late-arriving approve_request
+        // events can also pick it up (see showApproval).
+        if (ev.call_id) {
+          judgeVerdicts.set(ev.call_id, {
+            recommendation: ev.recommendation,
+            risk_level: ev.risk_level,
+            confidence: ev.confidence,
+            reasoning: ev.reasoning,
+          });
+          const row = approvalTools.querySelector(
+            '.dcall[data-call-id="' + cssEscape(ev.call_id) + '"]',
+          );
+          if (row) {
+            applyJudgeVerdictToRow(row, judgeVerdicts.get(ev.call_id));
+            // Claim focus now that the reviewer has context to act on.
+            // Only for the first-pending call so batch approvals don't
+            // fight over focus as verdicts trickle in.
+            if (ev.call_id === pendingApprovalCallId && !approvalFocusClaimed) {
+              claimApprovalFocusForVerdict(judgeVerdicts.get(ev.call_id));
+            }
+            break;
+          }
+        }
+        // Fallback — no matching pending row (approval already resolved
+        // or call_id missing).  Surface as a chat message so the verdict
+        // isn't silently dropped.
         appendText(
           "tool",
           "[judge] " +
@@ -639,7 +825,10 @@
         });
         break;
       case "info":
-        appendText("tool", ev.message || "", { label: "info" });
+        // .msg.info (think-indigo) is the intended variant for info
+        // events; prior routing to "tool" gave them accent-tinted tool
+        // styling which mis-categorised them as tool calls.
+        appendText("info", ev.message || "", { label: "info" });
         break;
       case "state_change":
         statusEl.textContent = ev.state || "";
@@ -702,14 +891,16 @@
     // document.body, which would plant a floating badge at the page
     // root on any template variant where the header hasn't rendered
     // yet (#q-7).  Return null so callers skip rendering; the next
-    // event will retry.
-    const host =
-      document.getElementById("coord-status") ||
-      document.getElementById("coord-header");
+    // event will retry.  Mount into #coord-header (appbar container)
+    // NOT #coord-status — statusEl.textContent = ev.state on every
+    // state_change event clobbers all children of #coord-status, which
+    // would delete the wait indicator on the next state tick.  As a
+    // sibling inside the appbar it stays alive across state updates.
+    const host = document.getElementById("coord-header");
     if (!host) return null;
     el = document.createElement("span");
     el.id = "coord-wait-indicator";
-    el.className = "ts-header-status coord-wait-indicator";
+    el.className = "appbar-status coord-wait-indicator";
     el.setAttribute("role", "status");
     el.setAttribute("aria-live", "polite");
     el.style.display = "none";
