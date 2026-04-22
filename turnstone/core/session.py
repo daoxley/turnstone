@@ -430,6 +430,19 @@ class ChatSession:
         self._title_generated = False
         self._read_files: set[str] = set()
         self.messages: list[dict[str, Any]] = []
+        self.ledger: dict[str, Any] = {
+            "jira": {
+                "known_tickets": [],
+                "last_ticket_focus": None,
+            },
+            "network": {},
+            "conversation": {
+                "current_task": None,
+                "open_questions": [],
+            },
+        }
+        self.last_assistant_reply: str | None = None
+        self._last_sent_messages: list[dict[str, Any]] = []
         self._last_usage: dict[str, int] | None = None
         self._msg_tokens: list[int] = []  # parallel to self.messages
         self._system_tokens = 0  # tokens for system_messages
@@ -1629,6 +1642,82 @@ class ChatSession:
         """System messages + conversation history."""
         return self.system_messages + self.messages
 
+    def _build_compact_messages(self) -> list[dict[str, Any]]:
+        msgs: list[dict[str, Any]] = []
+        msgs.extend(self.system_messages)
+
+        summary = self._render_session_summary()
+        if summary:
+            msgs.append(
+                {
+                    "role": "assistant",
+                    "content": summary,
+                }
+            )
+
+        if self.last_assistant_reply:
+            msgs.append(
+                {
+                    "role": "assistant",
+                    "content": self.last_assistant_reply,
+                }
+            )
+
+        last_user = next((m for m in reversed(self.messages) if m.get("role") == "user"), None)
+        if last_user:
+            msgs.append(last_user)
+
+        latest_tools: list[dict[str, Any]] = []
+        for m in reversed(self.messages):
+            if m.get("role") == "tool":
+                latest_tools.append(m)
+            elif m.get("role") == "assistant" and latest_tools:
+                break
+        msgs.extend(reversed(latest_tools))
+
+        return msgs
+
+    def _render_session_summary(self) -> str:
+        jira = self.ledger.get("jira", {})
+        network = self.ledger.get("network", {})
+        conversation = self.ledger.get("conversation", {})
+
+        tickets = jira.get("known_tickets", []) or []
+        if tickets:
+            ticket_lines = "\n".join(
+                f"- {t.get('ticket', '?')} | {t.get('type', 'Unknown')} | "
+                f"{t.get('status', 'Unknown')} | {t.get('assignee', 'Unassigned')} | "
+                f"{t.get('summary', '')}"
+                for t in tickets[-10:]
+            )
+        else:
+            ticket_lines = "- None"
+
+        open_questions = conversation.get("open_questions", []) or []
+        if open_questions:
+            open_q_lines = "\n".join(f"- {q}" for q in open_questions[:5])
+        else:
+            open_q_lines = "- None"
+
+        return (
+            "SESSION SUMMARY\n\n"
+            f"Current task: {conversation.get('current_task') or 'Unknown'}\n"
+            f"Focused ticket: {jira.get('last_ticket_focus') or 'None'}\n\n"
+            "Known Jira tickets:\n"
+            f"{ticket_lines}\n\n"
+            "Latest network/access context:\n"
+            f"- Device: {network.get('device') or 'Unknown'}\n"
+            f"- Interface: {network.get('interface') or 'Unknown'}\n"
+            f"- VRF: {network.get('vrf') or 'Unknown'}\n"
+            f"- VDOM: {network.get('vdom') or 'Unknown'}\n"
+            f"- Result: {network.get('access_result') or 'Unknown'}\n"
+            f"- Failure point: {network.get('failure_point') or 'Unknown'}\n"
+            f"- Summary: {network.get('latest_summary') or 'None'}\n\n"
+            "Open questions:\n"
+            f"{open_q_lines}\n\n"
+            "Use this as durable memory. Prefer it over older transcript details."
+        )
+
     def _emit_state(self, state: str) -> None:
         """Notify UI of a workstream state transition."""
         self.ui.on_state_change(state)
@@ -2134,7 +2223,20 @@ class ChatSession:
         try:
             while True:
                 self._check_cancelled(my_generation)
-                msgs = self._full_messages()
+                msgs = self._build_compact_messages()
+                self._last_sent_messages = msgs
+
+                log.info(
+                    "compact_request",
+                    total_msgs=len(msgs),
+                    roles=[m.get("role") for m in msgs],
+                )
+                log.info(
+                    "compact_request_retry",
+                    total_msgs=len(msgs),
+                    roles=[m.get("role") for m in msgs],
+                    approx_chars=sum(len(str(m.get("content", ""))) for m in msgs),
+                )
 
                 if self.debug:
                     self._debug_print_request(msgs)
@@ -2171,7 +2273,21 @@ class ChatSession:
                         self.ui.on_thinking_stop()
                         try:
                             self._compact_messages(auto=True)
-                            msgs = self._full_messages()
+                            msgs = self._build_compact_messages()
+                            self._last_sent_messages = msgs
+
+                            log.info(
+                                "compact_request_retry",
+                                total_msgs=len(msgs),
+                                roles=[m.get("role") for m in msgs],
+                            )
+                            log.info(
+                                "compact_request",
+                                total_msgs=len(msgs),
+                                roles=[m.get("role") for m in msgs],
+                                approx_chars=sum(len(str(m.get("content", ""))) for m in msgs),
+                            )
+
                             self.ui.on_thinking_start()
                             stream = self._create_stream_with_retry(msgs)
                         except Exception:
@@ -2196,6 +2312,7 @@ class ChatSession:
                 self._update_token_table(assistant_msg)
                 self._print_status_line()  # Report usage for EVERY API call
                 self.messages.append(assistant_msg)
+                self.last_assistant_reply = assistant_msg.get("content", "") or None
                 self._msg_tokens.append(
                     self._assistant_pending_tokens
                     or max(
@@ -2263,6 +2380,7 @@ class ChatSession:
                 # Execute tool calls (potentially in parallel)
                 self._emit_state("running")
                 results, user_feedback = self._execute_tools(tool_calls)
+                self._update_ledger_from_tools(tool_calls, results)
 
                 # Bail if generation was superseded during tool execution.
                 if self._generation != my_generation:
@@ -3039,7 +3157,7 @@ class ChatSession:
         # Images get a fixed token budget (subtracted).  Documents
         # tokenize non-linearly depending on provider — excluded from
         # calibration so they don't skew the text ratio.
-        all_msgs = self._full_messages()  # system + self.messages (before append)
+        all_msgs = self._last_sent_messages or self._full_messages()  # system + self.messages (before append)
         active_tools = self._get_active_tools() or []
         tool_def_chars = sum(len(json.dumps(t)) for t in active_tools)
         text_chars = 0
@@ -5746,6 +5864,69 @@ class ChatSession:
             )
         self._report_tool_result(call_id, "list_workstreams", summary)
         return call_id, self._truncate_output(output)
+
+    def _update_ledger_from_tools(
+        self,
+        tool_calls: list[dict[str, Any]],
+        results: list[tuple[str, str | list[dict[str, Any]]]],
+    ) -> None:
+        by_call_id = {tc.get("id", ""): tc for tc in tool_calls}
+
+        for tc_id, output in results:
+            tc = by_call_id.get(tc_id, {})
+            name = tc.get("function", {}).get("name", "")
+
+            if not isinstance(output, str):
+                continue
+
+            try:
+                data = json.loads(output)
+            except Exception:
+                continue
+
+            if name.startswith("jira"):
+                ticket = {
+                    "ticket": data.get("ticket"),
+                    "type": data.get("type"),
+                    "status": data.get("status"),
+                    "assignee": data.get("assignee"),
+                    "summary": data.get("summary"),
+                }
+                if ticket.get("ticket"):
+                    self._upsert_ticket(ticket)
+                    self.ledger["jira"]["last_ticket_focus"] = ticket["ticket"]
+
+            elif name in ("analyze_connectivity", "traceroute", "firewall_rules"):
+                self.ledger["network"].update(
+                    {
+                        "device": data.get("device"),
+                        "interface": data.get("interface"),
+                        "vrf": data.get("vrf"),
+                        "vdom": data.get("vdom"),
+                        "access_result": data.get("result") or data.get("access_result"),
+                        "failure_point": data.get("failure_point"),
+                        "latest_summary": data.get("summary") or data.get("latest_trace_summary"),
+                    }
+                )
+
+    def _upsert_ticket(self, patch: dict[str, Any]) -> None:
+        tickets = self.ledger["jira"]["known_tickets"]
+        ticket_id = patch.get("ticket")
+        if not ticket_id:
+            return
+
+        for idx, existing in enumerate(tickets):
+            if existing.get("ticket") == ticket_id:
+                merged = dict(existing)
+                for k, v in patch.items():
+                    if v not in (None, ""):
+                        merged[k] = v
+                tickets[idx] = merged
+                break
+        else:
+            tickets.append(patch)
+
+        self.ledger["jira"]["known_tickets"] = tickets[-12:]
 
     def _prepare_list_nodes(self, call_id: str, args: dict[str, Any]) -> dict[str, Any]:
         if self._coord_client is None:
