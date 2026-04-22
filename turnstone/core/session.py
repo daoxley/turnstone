@@ -441,7 +441,7 @@ class ChatSession:
                 "open_questions": [],
             },
         }
-        self.last_assistant_reply: str | None = None
+        self._last_assistant_message: dict[str, Any] | None = None
         self._last_sent_messages: list[dict[str, Any]] = []
         self._last_usage: dict[str, int] | None = None
         self._msg_tokens: list[int] = []  # parallel to self.messages
@@ -1643,38 +1643,29 @@ class ChatSession:
         return self.system_messages + self.messages
 
     def _build_compact_messages(self) -> list[dict[str, Any]]:
+        log.info("compact_builder.enter", ws_id=self._ws_id)
         msgs: list[dict[str, Any]] = []
         msgs.extend(self.system_messages)
 
         summary = self._render_session_summary()
         if summary:
-            msgs.append(
-                {
-                    "role": "assistant",
-                    "content": summary,
-                }
-            )
+            msgs.append({"role": "assistant", "content": summary})
 
-        if self.last_assistant_reply:
-            msgs.append(
-                {
-                    "role": "assistant",
-                    "content": self.last_assistant_reply,
-                }
-            )
+        if self._last_assistant_message:
+            msgs.append(copy.deepcopy(self._last_assistant_message))
 
         last_user = next((m for m in reversed(self.messages) if m.get("role") == "user"), None)
         if last_user:
-            msgs.append(last_user)
+            msgs.append(copy.deepcopy(last_user))
 
         latest_tools: list[dict[str, Any]] = []
         for m in reversed(self.messages):
             if m.get("role") == "tool":
-                latest_tools.append(m)
+                latest_tools.append(copy.deepcopy(m))
             elif m.get("role") == "assistant" and latest_tools:
                 break
-        msgs.extend(reversed(latest_tools))
 
+        msgs.extend(reversed(latest_tools))
         return msgs
 
     def _render_session_summary(self) -> str:
@@ -2184,6 +2175,7 @@ class ChatSession:
         ``reserved_for_msg_id`` so a stale send can't steal rows
         reserved to a different one.
         """
+        log.info("chat_session.send.enter", ws_id=self._ws_id, user_input_preview=user_input[:80])
         self._refresh_model_from_registry()
         # Token budget approval gate
         if self._budget_exhausted:
@@ -2277,17 +2269,17 @@ class ChatSession:
                             self._last_sent_messages = msgs
 
                             log.info(
-                                "compact_request_retry",
-                                total_msgs=len(msgs),
-                                roles=[m.get("role") for m in msgs],
-                            )
-                            log.info(
                                 "compact_request",
                                 total_msgs=len(msgs),
                                 roles=[m.get("role") for m in msgs],
                                 approx_chars=sum(len(str(m.get("content", ""))) for m in msgs),
                             )
-
+                            log.info(
+                                "compact_request_retry",
+                                total_msgs=len(msgs),
+                                roles=[m.get("role") for m in msgs],
+                            )
+                        
                             self.ui.on_thinking_start()
                             stream = self._create_stream_with_retry(msgs)
                         except Exception:
@@ -2312,7 +2304,7 @@ class ChatSession:
                 self._update_token_table(assistant_msg)
                 self._print_status_line()  # Report usage for EVERY API call
                 self.messages.append(assistant_msg)
-                self.last_assistant_reply = assistant_msg.get("content", "") or None
+                self._last_assistant_message = copy.deepcopy(assistant_msg)
                 self._msg_tokens.append(
                     self._assistant_pending_tokens
                     or max(
